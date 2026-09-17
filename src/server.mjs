@@ -1,15 +1,15 @@
-import 'dotenv/config';
+﻿import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
 import ExcelJS from 'exceljs';
 import { db, json, parseJson } from './db.mjs';
-import { extractText, inferProfile } from './services/resume.mjs';
+import { extractText, inferProfile, extractPreferredResumeFromZip } from './services/resume.mjs';
 import { searchJobs } from './services/jobs.mjs';
 import { rankJobs } from './services/ranking.mjs';
 import { tailorResume } from './services/tailor.mjs';
-import { applyToJob } from './apply/engine.mjs';
+import { applyToJob, openLoginSession, closeLoginSession } from './apply/engine.mjs';
 import { runtime } from './runtime.mjs';
 
 const ROOT = process.cwd();
@@ -27,21 +27,26 @@ const getRun = id => db.prepare('SELECT * FROM runs WHERE id=?').get(id);
 const getJobs = id => db.prepare('SELECT * FROM jobs WHERE run_id=? ORDER BY score DESC').all(id);
 app.post('/api/resume/upload', upload.single('resume'), async (req,res) => {
   try {
-    if (!req.file) return res.status(400).json({error:'Arquivo não recebido'});
+    if (!req.file) return res.status(400).json({error:'Arquivo nÃ£o recebido'});
     const ext = path.extname(req.file.originalname || '');
     const stored = `${req.file.path}${ext}`;
     fs.renameSync(req.file.path,stored);
     const text = await extractText(stored);
+    let sourcePath=stored;
+    if(ext.toLowerCase()==='.zip'){
+      sourcePath=extractPreferredResumeFromZip(stored,uploadDir)||path.join(uploadDir,`zip_resume_${Date.now()}.txt`);
+      if(sourcePath!==stored && !fs.existsSync(sourcePath)) fs.writeFileSync(sourcePath,text,'utf8');
+    }
     const profile = inferProfile(text);
     const info = db.prepare('INSERT INTO resumes(original_name,stored_path,extracted_text,profile_json) VALUES(?,?,?,?)')
-      .run(req.file.originalname,stored,text,json(profile));
+      .run(req.file.originalname,sourcePath,text,json(profile));
     res.json({resumeId:Number(info.lastInsertRowid),profile:{...profile,rawText:undefined},chars:text.length});
   } catch(e) { res.status(500).json({error:String(e.message||e)}); }
 });
 
 app.patch('/api/resume/:id/profile',(req,res) => {
   const id = Number(req.params.id); const row = getResume(id);
-  if (!row) return res.status(404).json({error:'Currículo não encontrado'});
+  if (!row) return res.status(404).json({error:'CurrÃ­culo nÃ£o encontrado'});
   const profile = {...parseJson(row.profile_json,{}),...(req.body||{})};
   db.prepare('UPDATE resumes SET profile_json=? WHERE id=?').run(json(profile),id);
   res.json({ok:true,profile:{...profile,rawText:undefined}});
@@ -50,10 +55,12 @@ app.post('/api/search', async (req,res) => {
   try {
     const {resumeId,filters={}} = req.body || {};
     const resume = getResume(Number(resumeId));
-    if (!resume) return res.status(400).json({error:'Currículo não encontrado'});
+    if (!resume) return res.status(400).json({error:'CurrÃ­culo nÃ£o encontrado'});
     const profile = parseJson(resume.profile_json,{});
     const raw = await searchJobs(profile,filters);
-    const jobs = rankJobs(raw,profile,filters);
+    const sentUrls=new Set(db.prepare(`SELECT DISTINCT j.url FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.status='SENT'`).all().map(x=>x.url));
+    const fresh=raw.filter(x=>!sentUrls.has(x.url));
+    const jobs = rankJobs(fresh,profile,filters);
     const info = db.prepare('INSERT INTO runs(filters_json,resume_id,status) VALUES(?,?,?)')
       .run(json(filters),resume.id,'SEARCHED');
     const runId = Number(info.lastInsertRowid);
@@ -62,13 +69,13 @@ app.post('/api/search', async (req,res) => {
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     for (const j of jobs) ins.run(runId,j.source,'',j.title,j.company||'',j.salary||'',j.location||'',j.url,
       j.description||'',j.score||0,j.pcd?1:0,j.remote?1:0,j.pj?'PJ':j.clt?'CLT':'');
-    res.json({runId,found:raw.length,compatible:jobs.length,jobs:jobs.slice(0,500)});
+    res.json({runId,found:raw.length,duplicatesSkipped:raw.length-fresh.length,compatible:jobs.length,jobs:jobs.slice(0,500)});
   } catch(e) { res.status(500).json({error:String(e.message||e)}); }
 });
 
 app.get('/api/run/:id/jobs',(req,res)=>res.json(getJobs(Number(req.params.id))));
 async function processRun(runId,onlyErrors=false) {
-  const run=getRun(runId); if(!run) throw new Error('Execução não encontrada');
+  const run=getRun(runId); if(!run) throw new Error('ExecuÃ§Ã£o nÃ£o encontrada');
   const resume=getResume(run.resume_id); const profile=parseJson(resume.profile_json,{});
   const prefs=parseJson(run.filters_json,{}); const dryRun=!prefs.autoSubmit;
   let jobs=getJobs(runId);
@@ -97,7 +104,7 @@ async function processRun(runId,onlyErrors=false) {
       }
     }
   }
-  await Promise.all([worker(),worker(),worker()]);
+  await Promise.all(Array.from({length:dryRun?3:1},()=>worker()));
   db.prepare('UPDATE runs SET status=? WHERE id=?').run('DONE',runId);
 }
 
@@ -107,17 +114,25 @@ function startBackground(runId,onlyErrors){
   }));
 }
 
+app.post('/api/session/open',async(req,res)=>{
+  try{res.json(await openLoginSession());}catch(e){res.status(500).json({error:String(e.message||e)});}
+});
+app.post('/api/session/close',async(req,res)=>{
+  try{res.json(await closeLoginSession());}catch(e){res.status(500).json({error:String(e.message||e)});}
+});
+app.get('/api/execution',(req,res)=>res.json({path:runtime.session}));
+
 app.post('/api/run/:id/apply',(req,res)=>{
-  const id=Number(req.params.id); if(!getRun(id)) return res.status(404).json({error:'Execução não encontrada'});
+  const id=Number(req.params.id); if(!getRun(id)) return res.status(404).json({error:'ExecuÃ§Ã£o nÃ£o encontrada'});
   startBackground(id,false); res.json({ok:true,runId:id});
 });
 app.post('/api/run/:id/retry',(req,res)=>{
-  const id=Number(req.params.id); if(!getRun(id)) return res.status(404).json({error:'Execução não encontrada'});
+  const id=Number(req.params.id); if(!getRun(id)) return res.status(404).json({error:'ExecuÃ§Ã£o nÃ£o encontrada'});
   startBackground(id,true); res.json({ok:true,runId:id});
 });
 app.get('/api/run/:id/status',(req,res)=>{
   const id=Number(req.params.id); const run=getRun(id);
-  if(!run) return res.status(404).json({error:'Execução não encontrada'});
+  if(!run) return res.status(404).json({error:'ExecuÃ§Ã£o nÃ£o encontrada'});
   const counts=db.prepare('SELECT status,COUNT(*) count FROM applications WHERE run_id=? GROUP BY status').all(id);
   const total=db.prepare('SELECT COUNT(*) count FROM jobs WHERE run_id=?').get(id).count;
   res.json({runId:id,status:run.status,total,counts:Object.fromEntries(counts.map(x=>[x.status,x.count]))});
@@ -129,7 +144,7 @@ function reportRows(runId){
       Enviado:x.status==='SENT'?'SIM':x.status,
       'Nome da vaga':x.title,
       Local:x.location||'',
-      'Remuneração':x.salary||'',
+      'RemuneraÃ§Ã£o':x.salary||'',
       Link:x.url
     }));
 }
@@ -138,13 +153,13 @@ app.get('/api/run/:id/export.xlsx',async(req,res)=>{
   const id=Number(req.params.id); const rows=reportRows(id);
   const wb=new ExcelJS.Workbook(); const ws=wb.addWorksheet('Candidaturas');
   ws.columns=[{header:'Enviado',key:'Enviado',width:16},{header:'Nome da vaga',key:'Nome da vaga',width:48},
-    {header:'Local',key:'Local',width:28},{header:'Remuneração',key:'Remuneração',width:22},{header:'Link',key:'Link',width:60}];
+    {header:'Local',key:'Local',width:28},{header:'RemuneraÃ§Ã£o',key:'RemuneraÃ§Ã£o',width:22},{header:'Link',key:'Link',width:60}];
   rows.forEach(r=>ws.addRow(r)); ws.getRow(1).font={bold:true}; ws.views=[{state:'frozen',ySplit:1}];
   const file=path.join(reportDir,`candidaturas_${id}.xlsx`); await wb.xlsx.writeFile(file); res.download(file);
 });
 app.get('/api/run/:id/export.csv',(req,res)=>{
   const rows=reportRows(Number(req.params.id));
-  const cols=['Enviado','Nome da vaga','Local','Remuneração','Link'];
+  const cols=['Enviado','Nome da vaga','Local','RemuneraÃ§Ã£o','Link'];
   const q=v=>'"'+String(v??'').replace(/"/g,'""').replace(/\r?\n/g,' ')+'"';
   const csv='\uFEFF'+[cols.join(','),...rows.map(r=>cols.map(c=>q(r[c])).join(','))].join('\n');
   res.type('text/csv').send(csv);
@@ -159,6 +174,15 @@ app.delete('/api/run/:id',(req,res)=>{
   res.json({ok:true});
 });
 
+app.post('/api/execution/delete',async(req,res)=>{
+  try{
+    await closeLoginSession();
+    db.close();
+    res.json({ok:true,path:runtime.session,message:'ExecuÃ§Ã£o encerrada e pasta agendada para exclusÃ£o.'});
+    setTimeout(()=>{try{fs.rmSync(runtime.session,{recursive:true,force:true});}finally{process.exit(0);}},600);
+  }catch(e){res.status(500).json({error:String(e.message||e)});}
+});
+
 app.post('/api/reset',(req,res)=>{
   db.exec('DELETE FROM applications; DELETE FROM jobs; DELETE FROM runs; DELETE FROM resumes;');
   for(const dir of [uploadDir,generatedDir,reportDir]){
@@ -168,8 +192,8 @@ app.post('/api/reset',(req,res)=>{
 });
 
 app.listen(PORT,'127.0.0.1',()=>{
-  console.log(`AUTOMACAO CURRICULO: http://127.0.0.1:${PORT}`);
-  console.log(`PASTA DESTA EXECUÇÃO: ${runtime.session}`);
+  console.log(`LetsWork: http://127.0.0.1:${PORT}`);
+  console.log(`PASTA DESTA EXECUÃ‡ÃƒO: ${runtime.session}`);
 });
 
 app.get('/api/run/:id/applications',(req,res)=>{
@@ -178,3 +202,4 @@ app.get('/api/run/:id/applications',(req,res)=>{
     FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.run_id=? ORDER BY j.score DESC`).all(id);
   res.json(rows);
 });
+

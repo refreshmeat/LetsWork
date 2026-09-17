@@ -1,27 +1,39 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>AUTOMAÇÃO CURRÍCULO</title>
+  <title>LetsWork</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 <main>
   <div class="topline">
     <div>
-      <h1>AUTOMAÇÃO CURRÍCULO</h1>
-      <div class="muted">Busca, adaptação e candidatura local.</div>
+      <h1>LetsWork</h1>
+      <div class="muted">Busca, adaptaÃ§Ã£o e candidatura local.</div>
     </div>
   </div>
 
+  <section class="card compact">
+    <div class="topline">
+      <div><strong>ExecuÃ§Ã£o atual</strong><div id="executionPath" class="muted">Carregando...</div></div>
+      <div class="actions no-margin">
+        <button id="openSession" type="button" class="secondary">Preparar login</button>
+        <button id="closeSession" type="button" class="secondary">Fechar sessÃ£o</button>
+        <button id="deleteExecution" type="button" class="danger">Encerrar e apagar execuÃ§Ã£o</button>
+      </div>
+    </div>
+    <div id="sessionStatus" class="status hidden"></div>
+  </section>
+
   <section class="card">
-    <h2>1. Currículo</h2>
+    <h2>1. CurrÃ­culo</h2>
     <form id="uploadForm">
-      <label>Arquivo do currículo
+      <label>Arquivo do currÃ­culo
         <input id="resumeFile" name="resume" type="file" required>
       </label>
-      <div class="muted">PDF, DOCX, imagens com OCR, ZIP e formatos de texto. O original nunca é sobrescrito.</div>
+      <div class="muted">PDF, DOCX, imagens com OCR, ZIP e formatos de texto. O original nunca Ã© sobrescrito.</div>
       <div class="actions"><button type="submit">Importar e ler</button></div>
     </form>
     <div id="uploadStatus" class="status hidden"></div>
@@ -33,10 +45,16 @@
       <label>E-mail<input id="pEmail" type="email"></label>
       <label>Telefone<input id="pPhone"></label>
       <label class="wide">LinkedIn<input id="pLinkedin"></label>
-      <label class="wide">Portfólio<input id="pPortfolio"></label>
+      <label class="wide">PortfÃ³lio<input id="pPortfolio"></label>
+      <label>CPF (opcional)<input id="pCpf"></label>
+      <label>Data de nascimento (opcional)<input id="pBirthDate" placeholder="DD/MM/AAAA"></label>
+      <label>CEP (opcional)<input id="pCep"></label>
+      <label class="wide">EndereÃ§o (opcional)<input id="pAddress"></label>
+      <label>Bairro (opcional)<input id="pNeighborhood"></label>
+      <label class="wide">InformaÃ§Ãµes adicionais confirmadas<textarea id="pAdditionalFacts" rows="4" placeholder="Ex.: inÃ­cio imediato, disponibilidade para viagens, experiÃªncia pessoal especÃ­fica..."></textarea></label>
     </div>
     <div class="actions">
-      <button id="saveProfile" type="button" class="secondary">Salvar correções</button>
+      <button id="saveProfile" type="button" class="secondary">Salvar correÃ§Ãµes</button>
     </div>
   </section>
 
@@ -47,8 +65,8 @@
     </div>
     <div class="grid" id="locationFields">
       <label>Estado(s)<input id="state" value="RJ" placeholder="RJ, SP"></label>
-      <label>Cidade(s)<input id="city" value="Rio de Janeiro" placeholder="Rio de Janeiro, Niterói"></label>
-      <label>Área desejada (opcional)<input id="area" placeholder="Ex.: Professora, UX/UI, Financeiro"></label>
+      <label>Cidade(s)<input id="city" value="Rio de Janeiro" placeholder="Rio de Janeiro, NiterÃ³i"></label>
+      <label>Ãrea desejada (opcional)<input id="area" placeholder="Ex.: Professora, UX/UI, Financeiro"></label>
     </div>    <div class="grid" style="margin-top:14px">
       <label>Modelo de trabalho
         <select id="workMode">
@@ -59,12 +77,12 @@
       </label>
       <label>PCD
         <select id="pcdMode">
-          <option value="exclude">Não buscar PCD</option>
-          <option value="include">PCD também</option>
+          <option value="exclude">NÃ£o buscar PCD</option>
+          <option value="include">PCD tambÃ©m</option>
           <option value="only">Somente PCD</option>
         </select>
       </label>
-      <label>Máximo de vagas<input id="limit" type="number" min="100" max="500" value="500"></label>
+      <label>MÃ¡ximo de vagas<input id="limit" type="number" min="100" max="500" value="500"></label>
     </div>
     <div class="checks">
       <label><input id="clt" type="checkbox" checked> CLT</label>
@@ -72,17 +90,17 @@
       <label><input id="availability" type="checkbox"> Disponibilidade confirmada</label>
     </div>
     <div class="grid two" style="margin-top:14px">
-      <label>Pretensão salarial padrão<input id="salaryExpectation" value="A combinar"></label>
-      <label>Execução
-        <select id="submitMode"><option value="dry">Simulação</option><option value="live">Modo real</option></select>
+      <label>PretensÃ£o salarial padrÃ£o<input id="salaryExpectation" value="A combinar"></label>
+      <label>ExecuÃ§Ã£o
+        <select id="submitMode"><option value="dry">SimulaÃ§Ã£o</option><option value="live">Modo real</option></select>
       </label>
-    </div>    <div class="actions"><button id="searchBtn" type="button">Buscar vagas compatíveis</button></div>
+    </div>    <div class="actions"><button id="searchBtn" type="button">Buscar vagas compatÃ­veis</button></div>
     <div id="searchStatus" class="status hidden"></div>
   </section>
 
   <section id="resultsCard" class="card hidden">
     <div class="topline">
-      <div><h2>4. Vagas compatíveis</h2><div id="resultMeta" class="muted"></div></div>
+      <div><h2>4. Vagas compatÃ­veis</h2><div id="resultMeta" class="muted"></div></div>
     </div>
     <div class="actions">
       <button id="applyBtn" type="button">Preparar e processar todas</button>
@@ -93,7 +111,7 @@
     <div id="applyStatus" class="status hidden"></div>
     <div class="table-wrap" style="margin-top:14px">
       <table>
-        <thead><tr><th>Vaga</th><th>Local</th><th>Remuneração</th><th>Fonte</th><th>Compat.</th><th>Link</th></tr></thead>
+        <thead><tr><th>Vaga</th><th>Local</th><th>RemuneraÃ§Ã£o</th><th>Fonte</th><th>Compat.</th><th>Status</th><th>Link</th></tr></thead>
         <tbody id="jobsBody"></tbody>
       </table>
     </div>
@@ -102,3 +120,4 @@
 <script type="module" src="/app.js"></script>
 </body>
 </html>
+

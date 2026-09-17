@@ -1,25 +1,25 @@
-{
-  "name": "automacao-curriculo",
-  "version": "0.1.0",
-  "description": "Automação local de busca, adaptação e candidatura a vagas",
-  "type": "module",
-  "main": "src/server.mjs",
-  "scripts": {
-    "start": "node src/server.mjs",
-    "dev": "node --watch src/server.mjs",
-    "check": "node --check src/server.mjs"
-  },
-  "dependencies": {
-    "@napi-rs/canvas": "^1.0.9",
-    "adm-zip": "^0.6.1",
-    "dotenv": "^17.4.2",
-    "exceljs": "^4.4.0",
-    "express": "^5.2.1",
-    "mammoth": "^1.12.3",
-    "multer": "^2.4.0",
-    "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "^6.3.289",
-    "playwright-core": "^1.63.0",
-    "tesseract.js": "^7.0.0"
-  }
+﻿{
+    "name":  "letswork",
+    "version":  "0.1.0",
+    "description":  "LetsWork - automaÃ§Ã£o local de busca, adaptaÃ§Ã£o e candidatura a vagas",
+    "type":  "module",
+    "main":  "src/server.mjs",
+    "scripts":  {
+                    "start":  "node src/server.mjs",
+                    "dev":  "node --watch src/server.mjs",
+                    "check":  "node --check src/server.mjs"
+                },
+    "dependencies":  {
+                         "@napi-rs/canvas":  "^1.0.9",
+                         "adm-zip":  "^0.6.1",
+                         "dotenv":  "^17.4.2",
+                         "exceljs":  "^4.4.0",
+                         "express":  "^5.2.1",
+                         "mammoth":  "^1.12.3",
+                         "multer":  "^2.4.0",
+                         "pdf-lib":  "^1.17.1",
+                         "pdfjs-dist":  "^6.3.289",
+                         "playwright-core":  "^1.63.0",
+                         "tesseract.js":  "^7.0.0"
+                     }
 }
