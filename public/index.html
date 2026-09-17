@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AUTOMAÇÃO CURRÍCULO</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main>
+  <div class="topline">
+    <div>
+      <h1>AUTOMAÇÃO CURRÍCULO</h1>
+      <div class="muted">Busca, adaptação e candidatura local.</div>
+    </div>
+  </div>
+
+  <section class="card">
+    <h2>1. Currículo</h2>
+    <form id="uploadForm">
+      <label>Arquivo do currículo
+        <input id="resumeFile" name="resume" type="file" required>
+      </label>
+      <div class="muted">PDF, DOCX, imagens com OCR, ZIP e formatos de texto. O original nunca é sobrescrito.</div>
+      <div class="actions"><button type="submit">Importar e ler</button></div>
+    </form>
+    <div id="uploadStatus" class="status hidden"></div>
+  </section>
+  <section id="profileCard" class="card hidden">
+    <h2>2. Dados identificados</h2>
+    <div class="profile">
+      <label class="wide">Nome<input id="pName"></label>
+      <label>E-mail<input id="pEmail" type="email"></label>
+      <label>Telefone<input id="pPhone"></label>
+      <label class="wide">LinkedIn<input id="pLinkedin"></label>
+      <label class="wide">Portfólio<input id="pPortfolio"></label>
+    </div>
+    <div class="actions">
+      <button id="saveProfile" type="button" class="secondary">Salvar correções</button>
+    </div>
+  </section>
+
+  <section id="filtersCard" class="card hidden">
+    <h2>3. Filtros da busca</h2>
+    <div class="checks">
+      <label><input id="nationwide" type="checkbox"> Buscar em todo o Brasil</label>
+    </div>
+    <div class="grid" id="locationFields">
+      <label>Estado(s)<input id="state" value="RJ" placeholder="RJ, SP"></label>
+      <label>Cidade(s)<input id="city" value="Rio de Janeiro" placeholder="Rio de Janeiro, Niterói"></label>
+      <label>Área desejada (opcional)<input id="area" placeholder="Ex.: Professora, UX/UI, Financeiro"></label>
+    </div>    <div class="grid" style="margin-top:14px">
+      <label>Modelo de trabalho
+        <select id="workMode">
+          <option value="include_remote">Presencial + remoto</option>
+          <option value="remote_only">Somente home office</option>
+          <option value="onsite_only">Somente presencial</option>
+        </select>
+      </label>
+      <label>PCD
+        <select id="pcdMode">
+          <option value="exclude">Não buscar PCD</option>
+          <option value="include">PCD também</option>
+          <option value="only">Somente PCD</option>
+        </select>
+      </label>
+      <label>Máximo de vagas<input id="limit" type="number" min="100" max="500" value="500"></label>
+    </div>
+    <div class="checks">
+      <label><input id="clt" type="checkbox" checked> CLT</label>
+      <label><input id="pj" type="checkbox"> PJ</label>
+      <label><input id="availability" type="checkbox"> Disponibilidade confirmada</label>
+    </div>
+    <div class="grid two" style="margin-top:14px">
+      <label>Pretensão salarial padrão<input id="salaryExpectation" value="A combinar"></label>
+      <label>Execução
+        <select id="submitMode"><option value="dry">Simulação</option><option value="live">Modo real</option></select>
+      </label>
+    </div>    <div class="actions"><button id="searchBtn" type="button">Buscar vagas compatíveis</button></div>
+    <div id="searchStatus" class="status hidden"></div>
+  </section>
+
+  <section id="resultsCard" class="card hidden">
+    <div class="topline">
+      <div><h2>4. Vagas compatíveis</h2><div id="resultMeta" class="muted"></div></div>
+    </div>
+    <div class="actions">
+      <button id="applyBtn" type="button">Preparar e processar todas</button>
+      <button id="retryBtn" type="button" class="secondary">Refazer erros</button>
+      <a id="xlsxBtn" class="button secondary" href="#">Exportar Excel</a>
+      <a id="csvBtn" class="button secondary" href="#">Exportar CSV</a>
+    </div>
+    <div id="applyStatus" class="status hidden"></div>
+    <div class="table-wrap" style="margin-top:14px">
+      <table>
+        <thead><tr><th>Vaga</th><th>Local</th><th>Remuneração</th><th>Fonte</th><th>Compat.</th><th>Link</th></tr></thead>
+        <tbody id="jobsBody"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

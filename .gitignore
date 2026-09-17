@@ -1,0 +1,14 @@
+node_modules/
+.env
+data/*.sqlite*
+uploads/*
+generated/*
+reports/*
+sessions/*
+server.log
+test_*.json
+!uploads/.gitkeep
+!generated/.gitkeep
+!reports/.gitkeep
+!sessions/.gitkeep
+data/test*
