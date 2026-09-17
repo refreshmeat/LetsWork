@@ -16,9 +16,11 @@ A automação nunca deve inventar formação, experiência, habilidade, disponib
 4. Rode `npm start`.
 5. Abra `http://127.0.0.1:4317`.
 
-## Dados locais
+## Dados locais e descarte
 
-O banco fica em `data/runtime.sqlite`. Currículos importados ficam em `uploads/`, versões geradas em `generated/` e relatórios em `reports/`. Esses diretórios são descartáveis e não são enviados ao Git.
+Cada inicialização cria uma pasta nova em `execucoes/EXECUCAO_AAAAMMDD_HHMMSS_PID/`. Dentro dela ficam `data/`, `uploads/`, `curriculos_personalizados/`, `relatorios/` e `sessoes_navegador/`. O terminal mostra o caminho exato da pasta ao iniciar.
+
+Depois de encerrar o script, essa pasta inteira pode ser apagada sem afetar o programa. Na próxima execução outra pasta limpa será criada automaticamente. Assim nenhuma execução precisa acumular banco, currículos personalizados ou relatórios antigos.
 
 ## Fluxo
 

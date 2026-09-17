@@ -10,13 +10,13 @@ import { searchJobs } from './services/jobs.mjs';
 import { rankJobs } from './services/ranking.mjs';
 import { tailorResume } from './services/tailor.mjs';
 import { applyToJob } from './apply/engine.mjs';
+import { runtime } from './runtime.mjs';
 
 const ROOT = process.cwd();
 const PORT = Number(process.env.PORT || 4317);
-const uploadDir = path.join(ROOT, 'uploads');
-const reportDir = path.join(ROOT, 'reports');
-const generatedDir = path.join(ROOT, 'generated');
-for (const dir of [uploadDir,reportDir,generatedDir]) fs.mkdirSync(dir,{recursive:true});
+const uploadDir = runtime.uploads;
+const reportDir = runtime.reports;
+const generatedDir = runtime.generated;
 const upload = multer({ dest:uploadDir, limits:{fileSize:80*1024*1024} });
 const app = express();
 app.use(express.json({limit:'2mb'}));
@@ -167,7 +167,10 @@ app.post('/api/reset',(req,res)=>{
   res.json({ok:true});
 });
 
-app.listen(PORT,'127.0.0.1',()=>console.log(`AUTOMACAO CURRICULO: http://127.0.0.1:${PORT}`));
+app.listen(PORT,'127.0.0.1',()=>{
+  console.log(`AUTOMACAO CURRICULO: http://127.0.0.1:${PORT}`);
+  console.log(`PASTA DESTA EXECUÇÃO: ${runtime.session}`);
+});
 
 app.get('/api/run/:id/applications',(req,res)=>{
   const id=Number(req.params.id);

@@ -12,3 +12,4 @@ test_*.json
 !reports/.gitkeep
 !sessions/.gitkeep
 data/test*
+execucoes/

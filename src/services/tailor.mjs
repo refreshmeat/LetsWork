@@ -2,10 +2,10 @@ import fs from 'fs';
 import path from 'path';
 import AdmZip from 'adm-zip';
 import { askAI, parseJsonLoose } from './ai.mjs';
+import { runtime } from '../runtime.mjs';
 
-const ROOT = process.cwd();
-const OUT = path.join(ROOT, 'generated');
-fs.mkdirSync(OUT, { recursive: true });
+const OUT = runtime.generated;
+fs.mkdirSync(OUT, { recursive:true });
 const slug = s => String(s || 'vaga').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
   .replace(/[^a-zA-Z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,70);
 const xmlDecode = s => s.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"');

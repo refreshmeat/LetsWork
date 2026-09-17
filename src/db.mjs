@@ -1,11 +1,7 @@
-import fs from 'fs';
-import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
+import { runtime } from './runtime.mjs';
 
-const ROOT = path.resolve(process.cwd());
-const DATA = path.join(ROOT, 'data');
-fs.mkdirSync(DATA, { recursive: true });
-export const db = new DatabaseSync(path.join(DATA, 'runtime.sqlite'));
+export const db = new DatabaseSync(`${runtime.data}\\runtime.sqlite`);
 
 db.exec(`
 PRAGMA journal_mode=WAL;
@@ -54,7 +50,6 @@ CREATE TABLE IF NOT EXISTS applications (
   UNIQUE(run_id, job_id)
 );
 `);
-
 export const json = value => JSON.stringify(value ?? null);
 export const parseJson = (value, fallback = null) => {
   try { return JSON.parse(value); } catch { return fallback; }
