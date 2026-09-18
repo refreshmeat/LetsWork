@@ -17,7 +17,7 @@ const uniqByUrl = rows => [...new Map(rows.filter(x => x.url).map(x => [x.url, x
 const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 
 const searchTaxonomy = {
-  design:['designer','design gráfico','designer júnior','assistente de design','auxiliar de design','estágio design','assistente de criação','auxiliar de criação','produção gráfica','comunicação visual','social media','mídias sociais','assistente de comunicação','estágio comunicação','marketing digital','assistente de marketing','auxiliar de marketing','estágio marketing','estágio publicidade','conteúdo digital','publicidade','audiovisual','editor de vídeo','videomaker','motion designer','web designer','ux ui','ux designer','ui designer','product designer','design digital','direção de arte','arte finalista'],
+  design:['designer','design gráfico','designer júnior','assistente de design','auxiliar de design','estágio design','assistente de criação','auxiliar de criação','produção gráfica','comunicação visual','social media','mídias sociais','assistente de social media','assistente de comunicação','estágio comunicação','marketing digital','assistente de marketing','auxiliar de marketing','estágio marketing','estágio publicidade','conteúdo digital','assistente de conteúdo','produção de conteúdo','publicidade','audiovisual','editor de vídeo','videomaker','motion designer','visual merchandising','assistente de visual merchandising','e-commerce','assistente de e-commerce','branding','web designer','ux ui','ux designer','ui designer','product designer','design digital','direção de arte','arte finalista'],
   marketing:['marketing','marketing digital','social media','redes sociais','conteúdo digital','content creator','publicidade','comunicação','assistente de marketing','auxiliar de marketing','analista de marketing','mídia','copywriter','tráfego pago','estágio marketing','estágio publicidade'],
   admin:['assistente administrativo','auxiliar administrativo','administrativo','recepcionista','secretária','backoffice','office assistant'],
   sales:['assistente comercial','vendedor','vendas','atendimento','customer success','inside sales','consultor comercial'],
@@ -84,7 +84,8 @@ export async function buildSearchTerms(profile, filters) {
   const typed=String(filters.area||'').split(/[,;/]/).map(x=>x.trim()).filter(Boolean);
   const curriculum=compactProfessionalText(profile);
   const basis=typed.length?`ÁREA PRETENDIDA: ${typed.join(', ')}\nCURRÍCULO: ${curriculum}`:curriculum;
-  const fallback=[...(typed.length?typed:inferredTerms(profile)),...genericProfileTerms(profile),...relatedTerms(basis)];
+  const entryFallback=(filters.experienceLevel||'entry')==='entry'?['assistente administrativo','auxiliar administrativo','recepcionista','atendimento ao cliente','assistente comercial','customer success','inside sales','assistente de atendimento']:[];
+  const fallback=[...new Set([...relatedTerms(basis),...(typed.length?[]:inferredTerms(profile)),...entryFallback,...genericProfileTerms(profile)])];
   const system='Você é o planejador de busca do LetsWork. Em UMA ÚNICA RESPOSTA, gere e revise uma família ampla de cargos plausíveis para o candidato. Use somente fatos profissionais comprovados e a área pretendida. Não invente formação, licença, registro, experiência ou senioridade. Não eleve credenciais. Use nomes curtos de cargos realmente usados em anúncios no Brasil. Antes de responder, elimine internamente duplicatas, variações cosméticas e funções incompatíveis. Retorne somente JSON.';
   const prompt=`DADOS VERIFICADOS:\n${String(basis).slice(0,3600)}\n\nNÍVEL DE EXPERIÊNCIA: ${filters.experienceLevel||'entry'}\nGere de 24 a 32 cargos distintos, misturando funções diretas, adjacentes e de entrada compatíveis. Cada termo deve ter no máximo 5 palavras. Também liste até 8 títulos claramente incompatíveis. Retorne exatamente {"terms":[...],"exclude":[...]}.`;
   const text=await askAI(system,prompt,{candidateId:profile.candidateId});
@@ -93,7 +94,7 @@ export async function buildSearchTerms(profile, filters) {
   const generated=[...new Set(raw.filter(x=>!obviousUnsafeTerm(x,basis)).filter(x=>!/^(?:estudante|tecn[oó]logo|bacharel|graduando|graduanda|formado|formada|curso de)\b/i.test(x)))];
   if(generated.length<12)throw new Error('ChatGPT não gerou termos de busca suficientes');
   const exclusions=Array.isArray(parsed?.exclude)?[...new Set(parsed.exclude.map(x=>String(x).trim()).filter(x=>x.length>=3))].slice(0,8):[];
-  const final=[...new Set([...typed,...generated,...fallback].map(x=>String(x).trim()).filter(Boolean))].slice(0,40);
+  const final=[...new Set([...typed,...generated.slice(0,8),...fallback,...generated.slice(8)].map(x=>String(x).trim()).filter(Boolean))].slice(0,60);
   final.exclusions=exclusions;
   return final;
 }

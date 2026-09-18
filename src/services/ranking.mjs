@@ -81,7 +81,7 @@ function locationBoost(job,filters,flags){
 function experienceOk(job,filters){
   const mode=filters.experienceLevel||'entry'; if(mode==='all') return true;
   const title=norm(job.title),text=norm(`${job.title} ${job.description||''}`);
-  const high=/\b(pleno|senior|sr\.?|especialista|coordenador|coordenadora|gerente|supervisor|supervisora|lider|head|diretor|diretora|lead)\b|\b(?:ii|iii|iv)\b|\bn[ií]vel\s*[234]\b|\blevel\s*[234]\b/.test(title);
+  const high=/\b(pleno|pl\.?|senior|sr\.?|especialista|coordenador|coordenadora|gerente|supervisor|supervisora|lider|head|diretor|diretora|lead)\b|\b(?:ii|iii|iv)\b|\bn[ií]vel\s*[234]\b|\blevel\s*[234]\b/.test(title);
   const req=[...text.matchAll(/experi[eê]ncia[^\d]{0,25}(\d+)\s*anos?|(?:mínimo|ao menos|pelo menos|mais de)?\s*(\d+)\s*anos?\s*(?:de )?experi[eê]ncia/g)].map(m=>Number(m[1]||m[2])).filter(Number.isFinite);
   if(mode==='none') return /sem experi[eê]ncia|n[aã]o exige experi[eê]ncia|primeiro emprego|est[aá]gio|aprendiz|trainee/.test(text);
   return !high&&!req.some(n=>n>=3);
@@ -105,8 +105,8 @@ function contractOk(flags,filters){
 }
 
 const domainRules={
-  design:/designer|design gr[aá]f|design digital|\bux\b|\bui\b|web designer|product designer|arte[- ]?final|diretor.*arte|desenhista|est[aá]gio.{0,30}design/,
-  marketing:/marketing|social media|conte[uú]do|publicidade|comunica[cç][aã]o|m[ií]dia|tr[aá]fego|copywriter/,
+  design:/designer|design gr[aá]f|design digital|\bux\b|\bui\b|web designer|product designer|arte[- ]?final|diretor.*arte|desenhista|est[aá]gio.{0,30}design|audiovisual|motion|editor.{0,12}v[ií]deo|videomaker|visual merchandising|branding|embalagem|diagrama[cç][aã]o/,
+  marketing:/marketing|social media|conte[uú]do|publicidade|comunica[cç][aã]o|m[ií]dia|tr[aá]fego|copywriter|e-?commerce|endomarketing/,
   teaching:/professor|professora|docente|instrutor|educador|pedagog/,
   tech:/desenvolvedor|programador|frontend|backend|full.?stack|software|devops|dados|data analyst|qa|tester/,
   admin:/administrativ|secret[aá]ri|recepcion|office assistant/,
@@ -151,11 +151,32 @@ function specializationMismatch(job,profileText){
   return specializationRules.some(rule=>rule.job.test(title)&&!rule.profile.test(profile));
 }
 
+const coreDomainAdjacency={design:['design','marketing'],marketing:['marketing','design'],admin:['admin','sales'],sales:['sales','marketing','admin'],teaching:['teaching'],tech:['tech'],finance:['finance','admin'],hr:['hr','admin']};
+const entryDomainAdjacency={design:['admin','sales'],marketing:['admin','sales'],admin:['hr'],sales:['admin'],teaching:[],tech:[],finance:['sales'],hr:['admin']};
+function higherEducationActive(profileText){return /\b(?:bacharelado|gradua[cç][aã]o|universidade|faculdade|\d+[º°]?\s*semestre|cursando\s+(?:design|administra[cç][aã]o|marketing|engenharia|direito|psicologia|pedagogia|tecnologia))\b/.test(norm(profileText));}
+function titleDomainTier(title,profileText){
+  const sourceDomains=inferDomains(profileText);
+  const core=new Set(sourceDomains.flatMap(d=>coreDomainAdjacency[d]||[d]));
+  if([...core].some(d=>domainRules[d]?.test(title)))return 'core';
+  const entry=new Set(sourceDomains.flatMap(d=>entryDomainAdjacency[d]||[]));
+  if([...entry].some(d=>domainRules[d]?.test(title)))return 'entry';
+  return 'none';
+}
+function entryMismatch(title,profileText){
+  const t=norm(title),higher=higherEducationActive(profileText);
+  if(higher&&/(?:est[aá]gio|estagi[aá]ri[oa]).{0,18}ensino m[eé]dio|ensino m[eé]dio.{0,18}(?:est[aá]gio|estagi[aá]ri[oa])/.test(t))return true;
+  if(higher&&/\b(?:jovem\s+aprendiz|pessoa\s+jovem\s+aprendiz|aprendiz)\b/.test(t))return true;
+  if(/\bmodelo de prova\b/.test(t))return true;
+  if(/^\s*(?:varejo|estagi[aá]ri[oa]|est[aá]gio|auxiliar|assistente)\s*$/.test(t))return true;
+  if(/\bauxiliar de produ[cç][aã]o\b/.test(t)&&!/gr[aá]fic|design|comunica[cç]|marketing|conte[uú]do|audiovisual/.test(t))return true;
+  return false;
+}
 function targetRelevance(job,profile,filters){
   const title=norm(job.title||'');
   const profileText=norm(`${profile.rawText||''} ${(profile.skills||[]).join(' ')}`);
   const exclusions=Array.isArray(filters.searchExclusions)?filters.searchExclusions.map(norm).filter(Boolean):[];
   if(exclusions.some(x=>title.includes(x))) return {ok:false,boost:0};
+  if(entryMismatch(title,profileText)) return {ok:false,boost:0};
   if(specializationMismatch(job,profileText)) return {ok:false,boost:0};
   if(/rio design|design barra|design shopping/.test(title)&&/vendedor|vendedora|caixa|operador|loja/.test(title)) return {ok:false,boost:0};
   if(/designer.{0,20}(sobrancelh|cilio|unha|estetic)/.test(title)&&!/sobrancelh|cilio|unha|estetic|beleza/.test(profileText)) return {ok:false,boost:0};
@@ -171,14 +192,13 @@ function targetRelevance(job,profile,filters){
   const roleTerms=titleTerms.filter(t=>{const tw=words(t);return tw.size&&[...tw].every(w=>roleWords.has(w));});
   const specificRoleTerms=roleTerms.filter(t=>words(t).size>=2);
   const hasEvidence=titleTermHits>0||bodyTermHits>0||titleProfile>0||bodyProfile>=2;
-  if(job.broadCollection===true){
-    const genericEntry=/^(estagio|aprendiz|trainee|assistente|auxiliar|analista|junior)\b/.test(norm(roleHead).trim());
-    const roleOk=specificRoleTerms.length>0||roleProfile>=2||(roleTerms.length>0&&(bodyTermHits>=2||bodyProfile>=2))||(genericEntry&&roleProfile>=1&&bodyTermHits>=2);
-    if(!hasEvidence||!roleOk) return {ok:false,boost:0};
-  }
+  const genericEntry=/^(estagio|estagiario|trainee|assistente|auxiliar|analista|junior)\b/.test(norm(roleHead).trim());
+  const domainTier=titleDomainTier(norm(roleHead),profileText),domainFit=domainTier!=='none';
+  const roleOk=specificRoleTerms.length>0||domainFit||(!genericEntry&&roleProfile>=2)||(roleTerms.length>0&&titleTermHits>0);
+  if(!hasEvidence||!roleOk) return {ok:false,boost:0,tier:'none'};
   const termBoost=Math.min(0.5,titleTermHits*0.22+Math.min(bodyTermHits,5)*0.055);
   const profileBoost=Math.min(0.18,roleProfile*0.07+Math.min(bodyProfile,4)*0.02);
-  return {ok:true,boost:termBoost+profileBoost};
+  return {ok:true,boost:termBoost+profileBoost,tier:domainTier};
 }
 function areaCompatibility(job,areaText){
   const directed=String(areaText||'').trim();
@@ -191,7 +211,7 @@ function areaCompatibility(job,areaText){
 }export function rankJobs(jobs,profile,filters){
   const profileText=`${profile.rawText||''} ${(profile.skills||[]).join(' ')}`;
   const pWords=words(profileText);
-  const minScore=Number(filters.minScore??0.13);
+  const minScore=Number(filters.minScore??0.08);
   const eligible=jobs.map(job=>{
     const flags=inferFlags(job);
     const jw=words(professionalJobText(job));
@@ -201,8 +221,8 @@ function areaCompatibility(job,areaText){
     const target=targetRelevance(job,profile,filters);
     const locBoost=locationBoost(job,filters,flags);
     const professionalScore=Math.min(1,base+area.boost+target.boost);
-    return {...job,...flags,areaMatch:area.ok,targetMatch:target.ok,professionalScore,score:Math.min(1,professionalScore+locBoost)};
-  }).filter(job=>job.areaMatch&&job.targetMatch&&job.professionalScore>=minScore)
+    return {...job,...flags,areaMatch:area.ok,targetMatch:target.ok,compatibilityTier:target.tier||'none',professionalScore,score:Math.min(1,professionalScore+locBoost)};
+  }).filter(job=>{const floor=job.compatibilityTier==='entry'?Number(filters.entryMinScore??0.24):minScore;return job.areaMatch&&job.targetMatch&&job.professionalScore>=floor;})
     .filter(job=>pcdOk(job,filters.pcdMode||'exclude'))
     .filter(job=>workModeOk(job,filters.workMode||'include_remote'))
     .filter(job=>locationOk(job,filters,job))
@@ -210,5 +230,8 @@ function areaCompatibility(job,areaText){
     .filter(job=>contractOk(job,filters))
     .sort((a,b)=>b.score-a.score);
 
-  return eligible;
+  const allowEntryFallback=(filters.experienceLevel||'entry')==='entry'&&!String(filters.area||'').trim();
+  const entryCap=allowEntryFallback?Math.max(40,Math.min(160,Number(filters.entryCap||120))):0;
+  let entryUsed=0;
+  return eligible.filter(job=>job.compatibilityTier!=='entry'||(++entryUsed<=entryCap));
 }
