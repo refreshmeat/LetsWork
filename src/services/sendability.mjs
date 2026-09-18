@@ -1,11 +1,11 @@
 const UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36';
 const decode=s=>String(s||'').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>');
 const strip=s=>decode(String(s||'').replace(/<[^>]+>/g,' ')).replace(/\s+/g,' ').trim();
-const loginUrlRx=/\/(?:login|signin|sign-in|auth)(?:[/?#]|$)|\/candidates\/signin(?:[/?#]|$)/i;
+const loginUrlRx=/\/(?:login(?:-candidatos)?|signin|sign-in|auth)(?:[/?#]|$)|\/candidates\/signin(?:[/?#]|$)/i;
 const loginTextRx=/fa[cç]a login|entre na sua conta|login para continuar|sign in to apply|log in to apply|acessar sua conta para continuar|criar conta para continuar|cadastre-se para continuar/i;
 const emailGateTextRx=/continue(?:r)?\s+(?:com|with)\s+(?:seu\s+)?e-?mail|digite\s+(?:seu\s+)?e-?mail\s+para\s+continuar|e-?mail\s+para\s+(?:entrar|continuar|acessar|cadastrar)|use\s+your\s+email\s+to\s+(?:continue|sign in|log in)/i;
-const applyTextRx=/candidat|apply|inscrev|quero me candidatar|enviar curr[ií]culo|candidate-se/i;
-const applyPathRx=/\/(?:apply|application|applications|candidat|candidates|inscricao|inscricoes)(?:[/?#]|$)/i;
+const applyTextRx=/candidat|apply|inscrev|quero me candidatar|enviar curr[ií]culo|candidate-se|tenho interesse|interesse nessa vaga/i;
+const applyPathRx=/\/(?:apply|application|applications|candidat|candidates|inscricao|inscricoes|tenho-interesse)(?:[/?#]|$)/i;
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 
 function absolute(href,base){
@@ -68,19 +68,23 @@ async function followApplication(url,depth=0){
 export async function probeJobSendability(job){
   const source=String(job?.source||'');
   if(source==='RioVagas')return {sendable:1,reason:'',verified:true};
-  const first=await fetchPage(job.url,7000);
+  // Vagas.com: sondar a própria página pública da vaga. O host api.vagas.com.br é a tela de login e gerava falso positivo.
+  const probeUrl=job.url;
+  const first=await fetchPage(probeUrl,7000);
   if(first.rateLimited)return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false,rateLimited:true};
   if(!first.ok)return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false};
-  if(loginEvidence(first))return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};
-  if(emailGateEvidence(first))return {sendable:0,reason:'EMAIL_REQUIRED',verified:true};
 
   const links=extractApplyLinks(first.html,first.url);
   if(source==='LinkedIn'){
-    const external=links.find(x=>!/linkedin\.com$/i.test(hostname(x))&&!/\.linkedin\.com$/i.test(hostname(x)));
+    const unwrap=x=>{try{const u=new URL(x);if(/(^|\.)linkedin\.com$/i.test(u.hostname)&&/redir|redirect/i.test(u.pathname)){for(const k of ['url','target','dest','destination']){const v=u.searchParams.get(k);if(v)return decodeURIComponent(v);}}return x;}catch{return x;}};
+    const external=links.map(unwrap).find(x=>!/linkedin\.com$/i.test(hostname(x))&&!/\.linkedin\.com$/i.test(hostname(x)));
     if(external){const r=await followApplication(external);return {...r,verified:r.reason!=='UNVERIFIED_LOGIN'};}
-    if(/sign-in-modal|authwall|sign in to apply|log in to apply/i.test(first.html))return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};
+    if(loginEvidence(first)||/sign-in-modal|authwall|sign in to apply|log in to apply/i.test(first.html))return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};
+    if(emailGateEvidence(first))return {sendable:0,reason:'EMAIL_REQUIRED',verified:true};
     return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false};
   }
+  if(loginEvidence(first))return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};
+  if(emailGateEvidence(first))return {sendable:0,reason:'EMAIL_REQUIRED',verified:true};
   if(source==='Gupy'||source==='Vagas.com'){
     const apply=links.find(x=>applyPathRx.test(x))||links[0];
     if(apply){const r=await followApplication(apply);return {...r,verified:r.reason!=='UNVERIFIED_LOGIN'};}

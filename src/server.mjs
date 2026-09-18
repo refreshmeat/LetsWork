@@ -96,7 +96,7 @@ function publicationDate(value){
 }
 function recentJobs(rows,days=15){
   const cutoff=Date.now()-Math.max(1,Math.min(60,Number(days)||15))*86400000;
-  return rows.filter(j=>{const d=publicationDate(j.publishedAt||j.published_at);return d&&d.getTime()>=cutoff&&d.getTime()<=Date.now()+86400000;});
+  return rows.filter(j=>{if(j.indexedRecent===true)return true;const d=publicationDate(j.publishedAt||j.published_at);return d&&d.getTime()>=cutoff&&d.getTime()<=Date.now()+86400000;});
 }
 const normSearch=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
 const rxEscape=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
@@ -110,7 +110,7 @@ function addSearchEvidence(job,terms){
   const clean=[...new Set((terms||[]).map(normSearch).filter(x=>x.length>=3))];
   const titleHits=clean.filter(t=>hasSearchTerm(title,t));
   const bodyHits=clean.filter(t=>hasSearchTerm(body,t));
-  return {...job,searchTitleHits:titleHits.length,searchBodyHits:bodyHits.length,searchMatchedTerms:bodyHits.slice(0,8)};
+  return {...job,searchTitleHits:titleHits.length,searchBodyHits:bodyHits.length,searchTitleTerms:titleHits.slice(0,10),searchMatchedTerms:bodyHits.slice(0,10)};
 }
 // Login é classificado por vaga. Fontes inteiras nunca são bloqueadas por conveniência.
 

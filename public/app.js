@@ -116,6 +116,9 @@ function fillProfile(p={}){
 }
 
 async function selectCandidate(id){
+  // Cada candidato começa com busca ampla por padrão; filtros restritivos de outro candidato não vazam para este perfil.
+  $('locationScope').value='state_priority';
+  $('experienceLevel').value='entry';
   const r=await fetch(`/api/candidate/${id}`),d=await r.json();
   if(!r.ok) return toast(d.error||'Candidato não encontrado');
   candidateId=id; currentCandidate=d; resumeId=d.resume?.id||null;

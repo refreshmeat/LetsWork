@@ -146,34 +146,34 @@ function decodeHtml(value){
 async function searchRioVagasRecent(terms,filters,max=2200){
   const out=new Map(), cutoff=new Date(Date.now()-Math.max(1,Math.min(60,Number(filters.recencyDays||15)))*86400000).toISOString();
   const deadline=Date.now()+45000;
-  for(const term of terms.slice(0,36)){
-    if(out.size>=max||Date.now()>=deadline)break;
-    for(let page=1;page<=3&&out.size<max&&Date.now()<deadline;page++){
-      const qs=new URLSearchParams({
-        categories:'1', per_page:'100', page:String(page), orderby:'date', order:'desc',
-        after:cutoff, search:term, _fields:'id,date,link,title,excerpt'
+  let page=1,totalPages=1;
+  while(page<=totalPages&&page<=30&&out.size<max&&Date.now()<deadline){
+    const qs=new URLSearchParams({
+      categories:'1',per_page:'100',page:String(page),orderby:'date',order:'desc',
+      after:cutoff,_fields:'id,date,link,title,excerpt'
+    });
+    try{
+      const r=await fetch(`https://riovagas.com.br/wp-json/wp/v2/posts?${qs}`,{
+        headers:{'user-agent':'Mozilla/5.0','accept-language':'pt-BR,pt;q=0.9'},signal:AbortSignal.timeout(8000)
       });
-      try{
-        const r=await fetch(`https://riovagas.com.br/wp-json/wp/v2/posts?${qs}`,{
-          headers:{'user-agent':'Mozilla/5.0','accept-language':'pt-BR,pt;q=0.9'},signal:AbortSignal.timeout(8000)
-        });
-        if(r.status===429){console.log('[RioVagas] HTTP 429; preservando resultados já coletados');return [...out.values()].slice(0,max);}
-        if(!r.ok)break;
-        const totalPages=Math.max(1,Number(r.headers.get('x-wp-totalpages')||1));
-        const rows=await r.json(); if(!Array.isArray(rows)||!rows.length)break;
-        for(const row of rows){
-          if(!String(row.link||'').includes('/riovagas/'))continue;
-          const title=decodeHtml(row.title?.rendered||''),description=decodeHtml(row.excerpt?.rendered||'');
-          if(!title||!row.link)continue;
-          out.set(row.link,{source:'RioVagas',title,url:row.link,description,company:'',salary:titleSalary(title),
-            location:titleLocation(title),publishedAt:row.date?`${row.date}-03:00`:'',loginFreeCandidate:true,broadCollection:true});
-          if(out.size>=max)break;
-        }
-        if(page>=totalPages||rows.length<100)break;
-        await delay(120);
-      }catch{break;}
-    }
+      if(r.status===429){console.log(`[RioVagas] HTTP 429 na página ${page}; preservando ${out.size} vagas já coletadas`);break;}
+      if(!r.ok)break;
+      totalPages=Math.min(30,Math.max(1,Number(r.headers.get('x-wp-totalpages')||1)));
+      const rows=await r.json();if(!Array.isArray(rows)||!rows.length)break;
+      for(const row of rows){
+        if(!String(row.link||'').includes('/riovagas/'))continue;
+        const title=decodeHtml(row.title?.rendered||''),description=decodeHtml(row.excerpt?.rendered||'');
+        if(!title||!row.link)continue;
+        out.set(row.link,{source:'RioVagas',title,url:row.link,description,company:'',salary:titleSalary(title),
+          location:titleLocation(title),publishedAt:row.date?`${row.date}-03:00`:'',loginFreeCandidate:true,broadCollection:true});
+        if(out.size>=max)break;
+      }
+      if(rows.length<100||page>=totalPages)break;
+      page++;
+      await delay(180);
+    }catch{break;}
   }
+  console.log(`[RioVagas] feed recente amplo: ${out.size} vagas em ${page} página(s)`);
   return [...out.values()].slice(0,max);
 }
 
@@ -336,10 +336,10 @@ fs.mkdirSync(sourceCacheDir,{recursive:true});
 function sourceCachePath(name,terms,filters){
   const basis=JSON.stringify({
     name,
-    strategy:name==='RioVagas'?'wp_api_terms_v2':'default_v1',
-    terms:terms.slice(0,12).map(norm),
-    city:norm(filters.city),
-    state:norm(filters.state),
+    strategy:name==='RioVagas'?'wp_api_recent_v3':'default_v1',
+    terms:name==='RioVagas'?[]:terms.slice(0,12).map(norm),
+    city:name==='RioVagas'?'':norm(filters.city),
+    state:name==='RioVagas'?'RJ':norm(filters.state),
     nationwide:Boolean(filters.nationwide),
     recencyDays:Number(filters.recencyDays||15)
   });
