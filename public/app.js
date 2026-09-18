@@ -63,11 +63,15 @@ function renderSelectedFiles(){
   const previous=Number($('primaryFileSelect').value||0);
   $('primaryFileSelect').innerHTML=selectedFiles.map((f,i)=>`<option value="${i}">${esc(f.name)}</option>`).join('');
   if(selectedFiles.length) $('primaryFileSelect').value=String(Math.min(previous,selectedFiles.length-1));
-  const likely=selectedFiles.findIndex(f=>/(^|[_ -])(cv|curr[ií]culo|curriculum|resume)([_ .-]|$)/i.test(f.name));
+  const likely=selectedFiles.findIndex(f=>{const n=String(f.name||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();return /(^|[_ -])(cv|curriculo|curriculum|resume)([_ .-]|$)/.test(n)&&!/portfolio/.test(n);});
   if(likely>=0) $('primaryFileSelect').value=String(likely);
 }
 function showNewCandidate(openPicker=false){
   candidateId=resumeId=runId=null; currentCandidate=null; currentJobs=[]; selectedFiles=[];
+  $('nationwide').checked=false; $('state').value='RJ'; $('city').value='Rio de Janeiro'; $('locationScope').value='state_priority'; $('area').value='';
+  $('workMode').value='include_remote'; $('pcdMode').value='exclude'; $('experienceLevel').value='entry'; $('recencyDays').value='15'; $('limit').value='500';
+  for(const id of ['clt','pj','internship','temporary','apprentice','freelance']) $(id).checked=true;
+  $('salaryExpectation').value='A combinar'; $('submitMode').value='dry'; $('availability').checked=false; $('salaryFromJob').checked=true; syncFilterInteractivity();
   $('resumeFile').value=''; renderSelectedFiles(); notice('uploadStatus','');
   $('newCandidateView').classList.remove('hidden'); $('candidateView').classList.add('hidden');
   $('candidateActions').classList.add('hidden'); $('pageTitle').textContent='Novo candidato';
@@ -81,7 +85,7 @@ $('resumeFile').addEventListener('change',()=>{
   $('resumeFile').value=''; renderSelectedFiles();
 });
 $('uploadForm').addEventListener('submit',async e=>{
-  e.preventDefault(); const files=[...selectedFiles]; if(!files.length) return;
+  e.preventDefault(); const files=[...selectedFiles]; if(!files.length){notice('uploadStatus','Selecione pelo menos um arquivo para importar.');return;}
   notice('uploadStatus','Lendo arquivos. OCR pode levar alguns instantes...');
   const fd=new FormData(); files.forEach(file=>fd.append('files',file)); fd.append('primaryIndex',$('primaryFileSelect').value||'0');
   try{
@@ -125,7 +129,7 @@ async function selectCandidate(id){
   $('newCandidateView').classList.add('hidden'); $('candidateView').classList.remove('hidden');
   $('candidateActions').classList.remove('hidden'); $('pageTitle').textContent=d.candidate.name;
   $('pageSubtitle').textContent=d.resume?.original_name?`Currículo: ${d.resume.original_name}`:'Cadastro local';
-  fillProfile(d.resume?.profile||{}); renderDocuments(d.documents||[]); activateTab('search');
+  fillProfile(d.resume?.profile||{}); renderDocuments(d.documents||[]); activateTab('search'); syncFilterInteractivity();
   renderCandidates(); await refreshCandidateStats(d);
 }
 async function refreshCandidateStats(detail=currentCandidate){
@@ -187,9 +191,16 @@ function filters(){
     salaryExpectation:$('salaryExpectation').value.trim()||'A combinar',salaryFromJob:$('salaryFromJob').checked,
     autoSubmit:$('submitMode').value==='live'};
 }
-$('nationwide').addEventListener('change',()=>{
-  $('state').disabled=$('nationwide').checked; $('city').disabled=$('nationwide').checked; $('locationScope').disabled=$('nationwide').checked;
-});
+function syncFilterInteractivity(){
+  const nationwide=$('nationwide').checked;
+  const locationIds=['state','city','locationScope'];
+  for(const id of locationIds){const el=$(id);if(el){el.disabled=nationwide;el.readOnly=false;el.style.pointerEvents='auto';}}
+  const alwaysEnabled=['nationwide','area','workMode','pcdMode','experienceLevel','recencyDays','limit','clt','pj','internship','temporary','apprentice','freelance','salaryExpectation','submitMode','availability','salaryFromJob','searchBtn'];
+  for(const id of alwaysEnabled){const el=$(id);if(el){el.disabled=false;el.readOnly=false;el.style.pointerEvents='auto';}}
+  const panel=$('tab-search');if(panel)panel.style.pointerEvents='auto';
+}
+$('nationwide').addEventListener('change',syncFilterInteractivity);
+window.addEventListener('focus',syncFilterInteractivity);
 
 async function saveProfile(){
   if(!resumeId) return false;
