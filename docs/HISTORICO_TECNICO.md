@@ -595,3 +595,14 @@ ApÃ³s essas mudanÃ§as:
 - o layout continuou sem overflow horizontal.
 
 Este bloco deve ser tratado como parte do histÃ³rico oficial do projeto e lido antes de futuras alteraÃ§Ãµes em fontes, sendability ou regras de login.
+
+## 21. Correção de histórico que zerava buscas
+
+Em 18/09/2026 foi identificado um erro de política no histórico do candidato. A busca removia do pool qualquer vaga cujo histórico tivesse status diferente de RESERVE/BLOCKED/UNVERIFIED. Na prática, isso fazia vagas apenas selecionadas em buscas anteriores e vagas que haviam dado erro de candidatura serem tratadas como definitivamente concluídas.
+
+Consequência observada: o pool continha 2.577 vagas recentes do RioVagas e o ranking encontrava dezenas de vagas relevantes, mas a busca retornava 0 enviáveis porque essas vagas já tinham aparecido em execuções anteriores, inclusive no run 28 interrompido por geração incorreta de currículo.
+
+Regra corrigida: apenas `SENT` e `ALREADY_APPLIED` bloqueiam permanentemente uma vaga para o mesmo candidato. `SELECTED`, `ERROR`, `RESERVE`, `BLOCKED_LOGIN` e `UNVERIFIED_LOGIN` podem reaparecer quando fizer sentido.
+
+Validação após a correção, em preview com o mesmo perfil e filtros padrão: 2.554 vagas coletadas, 2.534 recentes, 3.351 no pool, apenas 5 já enviadas ignoradas, 525 compatíveis e 79 enviáveis sem login. O RioVagas voltou a contribuir com 79 vagas enviáveis na rodada.
+

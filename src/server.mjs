@@ -199,7 +199,7 @@ app.post('/api/search', async (req,res) => {
     const storedPool=poolRows.map(x=>({source:x.source,title:x.title,company:x.company,location:x.location,salary:x.salary,url:x.url,description:x.description,contractType:x.contract_type,publishedAt:x.published_at,loginFreeCandidate:x.sendable===1||x.source==='RioVagas',requiresLogin:['LOGIN_REQUIRED','EMAIL_REQUIRED'].includes(x.blocked_reason),broadCollection:/^(RioVagas|EmpregosRJ)$/i.test(x.source||'')}));
     const candidatePool=[...new Map([...storedPool,...recent].map(j=>[jobFingerprint(j),addSearchEvidence(j,searchTerms)])).values()];
     for(const j of candidatePool){const cached=poolMap.get(jobFingerprint(j));if(cached?.sendable===1)j.loginFreeCandidate=true;if(['LOGIN_REQUIRED','EMAIL_REQUIRED'].includes(cached?.blocked_reason))j.requiresLogin=true;}
-    const historyRows=db.prepare("SELECT fingerprint FROM candidate_job_history WHERE candidate_id=? AND status NOT IN ('RESERVE','BLOCKED_LOGIN','UNVERIFIED_LOGIN')").all(resume.candidate_id);
+    const historyRows=db.prepare("SELECT fingerprint FROM candidate_job_history WHERE candidate_id=? AND status IN ('SENT','ALREADY_APPLIED')").all(resume.candidate_id);
     const seen=new Set(historyRows.map(x=>x.fingerprint));
     const unseen=candidatePool.filter(j=>!seen.has(jobFingerprint(j)));
     const ranked = rankJobs(unseen,profile,effectiveFilters);

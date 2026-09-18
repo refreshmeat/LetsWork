@@ -51,3 +51,7 @@ Data: 18/09/2026
 - currÃ­culo especÃ­fico por vaga;
 - testes nÃ£o contaminam histÃ³rico real;
 - nÃ£o versionar dados de candidatos, bancos, certificados ou executÃ¡veis.
+
+- Correção de 18/09/2026: histórico de busca não bloqueia mais vagas com status `SELECTED` ou `ERROR`. Apenas `SENT` e `ALREADY_APPLIED` impedem a vaga de reaparecer em buscas futuras.
+- Preview de validação após a correção: 2.554 coletadas, 2.534 recentes, 3.351 no pool, 525 compatíveis e 79 enviáveis sem login; somente 5 vagas já realmente enviadas foram ignoradas pelo histórico.
+
