@@ -49,7 +49,7 @@ O produto Ã© um aplicativo desktop local para Windows. Ele deve:
 - Electron 44.
 - Janela maximizada.
 - Backend Express local em 127.0.0.1:4317.
-- IA local via Ollama, modelo letswork-ai baseado em qwen3:1.7b.
+- IA via sessÃ£o persistente do ChatGPT web, GPT-5.6 Sol High, controlada localmente por CDP em 127.0.0.1:9223. O Chromium dedicado roda fora da tela e sem Ã­cone na barra de tarefas; o CDP forÃ§a a pÃ¡gina como ativa para preservar o streaming. NÃ£o hÃ¡ Ollama/Llama nem fallback para API oficial.
 - Build portÃ¡til para Windows.
 - Assinatura local Authenticode com certificado â€œLetsWork Local Code Signingâ€.
 
@@ -596,13 +596,13 @@ ApÃ³s essas mudanÃ§as:
 
 Este bloco deve ser tratado como parte do histÃ³rico oficial do projeto e lido antes de futuras alteraÃ§Ãµes em fontes, sendability ou regras de login.
 
-## 21. Correção de histórico que zerava buscas
+## 21. Correï¿½ï¿½o de histï¿½rico que zerava buscas
 
-Em 18/09/2026 foi identificado um erro de política no histórico do candidato. A busca removia do pool qualquer vaga cujo histórico tivesse status diferente de RESERVE/BLOCKED/UNVERIFIED. Na prática, isso fazia vagas apenas selecionadas em buscas anteriores e vagas que haviam dado erro de candidatura serem tratadas como definitivamente concluídas.
+Em 18/09/2026 foi identificado um erro de polï¿½tica no histï¿½rico do candidato. A busca removia do pool qualquer vaga cujo histï¿½rico tivesse status diferente de RESERVE/BLOCKED/UNVERIFIED. Na prï¿½tica, isso fazia vagas apenas selecionadas em buscas anteriores e vagas que haviam dado erro de candidatura serem tratadas como definitivamente concluï¿½das.
 
-Consequência observada: o pool continha 2.577 vagas recentes do RioVagas e o ranking encontrava dezenas de vagas relevantes, mas a busca retornava 0 enviáveis porque essas vagas já tinham aparecido em execuções anteriores, inclusive no run 28 interrompido por geração incorreta de currículo.
+Consequï¿½ncia observada: o pool continha 2.577 vagas recentes do RioVagas e o ranking encontrava dezenas de vagas relevantes, mas a busca retornava 0 enviï¿½veis porque essas vagas jï¿½ tinham aparecido em execuï¿½ï¿½es anteriores, inclusive no run 28 interrompido por geraï¿½ï¿½o incorreta de currï¿½culo.
 
 Regra corrigida: apenas `SENT` e `ALREADY_APPLIED` bloqueiam permanentemente uma vaga para o mesmo candidato. `SELECTED`, `ERROR`, `RESERVE`, `BLOCKED_LOGIN` e `UNVERIFIED_LOGIN` podem reaparecer quando fizer sentido.
 
-Validação após a correção, em preview com o mesmo perfil e filtros padrão: 2.554 vagas coletadas, 2.534 recentes, 3.351 no pool, apenas 5 já enviadas ignoradas, 525 compatíveis e 79 enviáveis sem login. O RioVagas voltou a contribuir com 79 vagas enviáveis na rodada.
+Validaï¿½ï¿½o apï¿½s a correï¿½ï¿½o, em preview com o mesmo perfil e filtros padrï¿½o: 2.554 vagas coletadas, 2.534 recentes, 3.351 no pool, apenas 5 jï¿½ enviadas ignoradas, 525 compatï¿½veis e 79 enviï¿½veis sem login. O RioVagas voltou a contribuir com 79 vagas enviï¿½veis na rodada.
 

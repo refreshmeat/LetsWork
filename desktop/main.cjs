@@ -3,13 +3,12 @@ const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
 const { spawn, spawnSync } = require('child_process');
+const { chromium } = require('playwright-core');
 
 const PORT = Number(process.env.PORT || 4317);
-const AI_PORT = 11435;
 let mainWindow = null;
 let logFile = null;
-let ollamaProcess = null;
-let ollamaOwned = false;
+let chatgptProcess = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 function log(msg){
@@ -27,32 +26,67 @@ async function waitUrl(url,tries=80){
   }
   return false;
 }
-function getOllamaExe(){
-  const candidates=[
-    process.env.OLLAMA_EXE,
-    process.env.LOCALAPPDATA&&path.join(process.env.LOCALAPPDATA,'Programs','Ollama','ollama.exe')
-  ].filter(Boolean);
-  return candidates.find(p=>fs.existsSync(p))||null;
+function getPlaywrightChromium(){
+  try{
+    const exe=chromium.executablePath();
+    if(exe&&fs.existsSync(exe)) return exe;
+  }catch{}
+  const root=process.env.LOCALAPPDATA?path.join(process.env.LOCALAPPDATA,'ms-playwright'):'';
+  if(root&&fs.existsSync(root)){
+    const candidates=fs.readdirSync(root,{withFileTypes:true})
+      .filter(x=>x.isDirectory()&&/^chromium-\d+$/i.test(x.name))
+      .sort((a,b)=>b.name.localeCompare(a.name,undefined,{numeric:true}))
+      .map(x=>path.join(root,x.name,'chrome-win64','chrome.exe'))
+      .filter(fs.existsSync);
+    if(candidates.length) return candidates[0];
+  }
+  return null;
+}
+function unpackedScript(name){
+  return app.isPackaged
+    ? path.join(process.resourcesPath,'app.asar.unpacked','scripts',name)
+    : path.join(__dirname,'..','scripts',name);
+}
+async function cloakChatGPTWindow(profile){
+  const script=unpackedScript('cloak-chatgpt-window.ps1');
+  if(!fs.existsSync(script)) return;
+  await new Promise(resolve=>{
+    const child=spawn('powershell.exe',['-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',script,profile],{windowsHide:true,stdio:'ignore'});
+    const done=()=>resolve();
+    child.once('exit',done);child.once('error',done);
+    setTimeout(done,3500);
+  });
 }
 
-async function ensureLocalAI(){
-  process.env.OLLAMA_URL=`http://127.0.0.1:${AI_PORT}`;
-  if(await waitUrl(`${process.env.OLLAMA_URL}/api/tags`,3)){
-    log('Ollama CPU já disponível'); return true;
+async function ensureChatGPTBrowser(dataRoot){
+  process.env.CHATGPT_CDP_URL='http://127.0.0.1:9223';
+  process.env.CHATGPT_WEB_MODEL='GPT-5.6 Sol';
+  process.env.CHATGPT_WEB_LEVEL='high';
+  const profile=path.join(dataRoot,'chatgpt-web-provider-profile');
+  fs.mkdirSync(profile,{recursive:true});
+  if(await waitUrl(`${process.env.CHATGPT_CDP_URL}/json/version`,4)){
+    await cloakChatGPTWindow(profile);
+    log('Sessão ChatGPT invisível já disponível'); return true;
   }
-  const exe=getOllamaExe();
-  if(!exe){log('Ollama não encontrado; IA local ficará indisponível');return false;}
-  const env={...process.env,
-    OLLAMA_HOST:`127.0.0.1:${AI_PORT}`,
-    OLLAMA_LLM_LIBRARY:'cpu_avx2',
-    CUDA_VISIBLE_DEVICES:'-1',
-    OLLAMA_NO_CLOUD:'true',
-    OLLAMA_KEEP_ALIVE:'15m'};
-  ollamaProcess=spawn(exe,['serve'],{env,windowsHide:true,stdio:'ignore'});
-  ollamaOwned=true;
-  const ok=await waitUrl(`${process.env.OLLAMA_URL}/api/tags`,80);
-  log(ok?'Ollama CPU iniciado':'Ollama CPU não respondeu');
-  return ok;
+  const exe=getPlaywrightChromium();
+  if(!exe) throw new Error('Chromium do Playwright não encontrado para abrir o ChatGPT.');
+  try{fs.rmSync(path.join(profile,'lockfile'),{force:true});}catch{}
+  chatgptProcess=spawn(exe,[
+    '--remote-debugging-port=9223',
+    `--user-data-dir=${profile}`,
+    '--no-first-run',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--window-position=-32000,-32000',
+    '--window-size=800,600',
+    'https://chatgpt.com/'
+  ],{windowsHide:true,stdio:'ignore'});
+  const ok=await waitUrl(`${process.env.CHATGPT_CDP_URL}/json/version`,100);
+  if(!ok) throw new Error('Navegador persistente do ChatGPT não respondeu.');
+  await cloakChatGPTWindow(profile);
+  log('Sessão ChatGPT iniciada invisível');
+  return true;
 }
 async function waitForServer(){
   const ok=await waitUrl(`http://127.0.0.1:${PORT}/api/ai/status`,100);
@@ -67,7 +101,7 @@ async function createWindow(){
   process.env.PORT=String(PORT);
   log('iniciando LetsWork em '+__dirname);
 
-  await ensureLocalAI();
+  await ensureChatGPTBrowser(dataRoot);
   const serverPath=path.join(__dirname,'..','src','server.mjs');
   await import(pathToFileURL(serverPath).href);
   await waitForServer();
@@ -109,10 +143,14 @@ app.on('activate',()=>{
 });
 
 app.on('before-quit',()=>{
-  if(ollamaOwned&&ollamaProcess){
-    try{spawnSync('taskkill',['/PID',String(ollamaProcess.pid),'/T','/F'],{windowsHide:true});}catch{}
-    ollamaProcess=null;
+  const profile=path.join(app.getPath('home'),'LetsWork','dados','chatgpt-web-provider-profile');
+  const script=unpackedScript('stop-chatgpt-browser.ps1');
+  if(fs.existsSync(script)){
+    try{spawnSync('powershell.exe',['-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',script,profile],{windowsHide:true,stdio:'ignore'});}catch{}
+  }else if(chatgptProcess?.pid){
+    try{spawnSync('taskkill',['/PID',String(chatgptProcess.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'});}catch{}
   }
+  chatgptProcess=null;
 });
 
 app.on('window-all-closed',()=>{

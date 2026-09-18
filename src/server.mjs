@@ -12,7 +12,7 @@ import { searchJobs, buildSearchTerms } from './services/jobs.mjs';
 import { rankJobs } from './services/ranking.mjs';
 import { classifyJobsForQueue } from './services/sendability.mjs';
 import { tailorResume } from './services/tailor.mjs';
-import { applyToJob, closeLoginSession } from './apply/engine.mjs';
+import { applyToJob, closeLoginSession, createJobContextCollector } from './apply/engine.mjs';
 import { runtime } from './runtime.mjs';
 import { storage, ensureCandidateDirs, candidateDir } from './storage.mjs';
 import { registerMultiFileRoute } from './multifile.mjs';
@@ -240,42 +240,99 @@ app.post('/api/search', async (req,res) => {
 app.get('/api/run/:id/jobs',(req,res)=>res.json(getJobs(Number(req.params.id))));
 async function processRun(runId,onlyErrors=false) {
   const run=getRun(runId); if(!run) throw new Error('Execução não encontrada');
-  const resume=getResume(run.resume_id); const supportDocuments=db.prepare('SELECT kind,original_name,stored_path FROM documents WHERE candidate_id=? AND is_primary=0').all(run.candidate_id); const profile={...parseJson(resume.profile_json,{}),candidateId:run.candidate_id,supportDocuments};
-  const prefs={...parseJson(run.filters_json,{}),candidateId:run.candidate_id}; const dryRun=!prefs.autoSubmit;
+  const resume=getResume(run.resume_id);
+  const supportDocuments=db.prepare('SELECT kind,original_name,stored_path FROM documents WHERE candidate_id=? AND is_primary=0').all(run.candidate_id);
+  const profile={...parseJson(resume.profile_json,{}),candidateId:run.candidate_id,supportDocuments};
+  const prefs={...parseJson(run.filters_json,{}),candidateId:run.candidate_id};
+  const dryRun=!prefs.autoSubmit;
   let jobs=getJobs(runId);
   if(onlyErrors){
-    const ids=new Set(db.prepare("SELECT job_id FROM applications WHERE run_id=? AND status IN ('ERROR','NEEDS_DATA')").all(runId).map(x=>x.job_id));
+    const ids=new Set(db.prepare("SELECT job_id FROM applications WHERE run_id=? AND status IN ('ERROR','NEEDS_DATA','PREPARING','READY')").all(runId).map(x=>x.job_id));
     jobs=jobs.filter(x=>ids.has(x.id));
   }
   db.prepare('UPDATE runs SET status=? WHERE id=?').run(onlyErrors?'RETRYING':'APPLYING',runId);
-  let cursor=0;
-  async function worker(){
-    while(cursor<jobs.length){
-      const job=jobs[cursor++];
+
+  const collector=createJobContextCollector(jobs,{concurrency:6});
+  collector.done.catch(()=>{});
+  const ready=[];
+  const waiters=[];
+  let producerDone=false;
+
+  const wake=()=>{
+    while(waiters.length && (ready.length || producerDone)) waiters.shift()();
+  };
+  const push=item=>{ready.push(item);wake();};
+  const pop=async()=>{
+    while(!ready.length){
+      if(producerDone) return null;
+      await new Promise(resolve=>waiters.push(resolve));
+    }
+    return ready.shift();
+  };
+
+  const saveApplication=(job,status,tailoredFile='',error='')=>{
+    db.prepare(`INSERT INTO applications(run_id,job_id,status,tailored_file,error,submitted_at)
+      VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,job_id) DO UPDATE SET status=excluded.status,
+      tailored_file=CASE WHEN excluded.tailored_file<>'' THEN excluded.tailored_file ELSE applications.tailored_file END,
+      error=excluded.error,submitted_at=excluded.submitted_at`)
+      .run(runId,job.id,status,tailoredFile,error||'',['SENT','ALREADY_APPLIED'].includes(status)?new Date().toISOString():null);
+  };
+  const updateHistory=(job,status)=>{
+    if(job.source_key) db.prepare(`UPDATE candidate_job_history SET status=?,last_seen_at=CURRENT_TIMESTAMP,last_run_id=?
+      WHERE candidate_id=? AND fingerprint=?`).run(status,runId,run.candidate_id,job.source_key);
+  };
+
+  async function producer(){
+    try{
+      for(const job of jobs){
+        const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
+        if(['SENT','ALREADY_APPLIED'].includes(old?.status)) continue;
+        if(old?.tailored_file && fs.existsSync(old.tailored_file)){
+          push({job,file:old.tailored_file});
+          continue;
+        }
+        saveApplication(job,'PREPARING','','');
+        try{
+          const ctx=await collector.get(job.id);
+          const enrichedJob={...job,description:[job.description||'',ctx?.text||''].filter(Boolean).join('\n\n').slice(0,50000)};
+          const tailored=await tailorResume(resume.stored_path,enrichedJob,profile);
+          saveApplication(job,'READY',tailored.file,'');
+          push({job:enrichedJob,file:tailored.file});
+        }catch(e){
+          const message=String(e?.message||e).slice(0,500);
+          saveApplication(job,'ERROR','',message);
+          updateHistory(job,'ERROR');
+        }
+      }
+    }finally{
+      producerDone=true;
+      wake();
+      await collector.done.catch(()=>{});
+    }
+  }
+
+  async function applyWorker(){
+    while(true){
+      const item=await pop();
+      if(!item) return;
+      const {job,file}=item;
       const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
       if(['SENT','ALREADY_APPLIED'].includes(old?.status)) continue;
       try{
-        let tailoredFile='';
-        const result=await applyToJob(job,resume.stored_path,profile,prefs,{dryRun,prepareResume:async enrichedJob=>{
-          const tailored=await tailorResume(resume.stored_path,enrichedJob,profile); tailoredFile=tailored.file; return tailored;
-        }});
-        db.prepare(`INSERT INTO applications(run_id,job_id,status,tailored_file,error,submitted_at)
-          VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,job_id) DO UPDATE SET status=excluded.status,
-          tailored_file=excluded.tailored_file,error=excluded.error,submitted_at=excluded.submitted_at`)
-          .run(runId,job.id,result.status,tailoredFile,result.error||'',['SENT','ALREADY_APPLIED'].includes(result.status)?new Date().toISOString():null);
+        const result=await applyToJob(job,file,profile,prefs,{dryRun});
+        saveApplication(job,result.status,file,result.error||'');
         if(result.status==='SKIPPED_LOGIN') db.prepare("UPDATE jobs SET sendable=0,blocked_reason='LOGIN_REQUIRED',selected=0,batch_no=0 WHERE id=?").run(job.id);
-        if(job.source_key) db.prepare(`UPDATE candidate_job_history SET status=?,last_seen_at=CURRENT_TIMESTAMP,last_run_id=?
-          WHERE candidate_id=? AND fingerprint=?`).run(result.status,runId,run.candidate_id,job.source_key);
+        updateHistory(job,result.status);
       }catch(e){
-        db.prepare(`INSERT INTO applications(run_id,job_id,status,error) VALUES(?,?,?,?)
-          ON CONFLICT(run_id,job_id) DO UPDATE SET status='ERROR',error=excluded.error`)
-          .run(runId,job.id,'ERROR',String(e.message||e).slice(0,500));
-        if(job.source_key) db.prepare(`UPDATE candidate_job_history SET status='ERROR',last_seen_at=CURRENT_TIMESTAMP,last_run_id=?
-          WHERE candidate_id=? AND fingerprint=?`).run(runId,run.candidate_id,job.source_key);
+        const message=String(e?.message||e).slice(0,500);
+        saveApplication(job,'ERROR',file,message);
+        updateHistory(job,'ERROR');
       }
     }
   }
-  await Promise.all(Array.from({length:dryRun?3:1},()=>worker()));
+
+  const workers=Array.from({length:dryRun?3:2},()=>applyWorker());
+  await Promise.all([producer(),...workers]);
   if(!dryRun) await closeLoginSession();
   db.prepare('UPDATE runs SET status=? WHERE id=?').run('DONE',runId);
 }

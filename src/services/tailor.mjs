@@ -9,8 +9,9 @@ import { runtime } from '../runtime.mjs';
 
 function outputDir(source){
   const parent=path.dirname(source),base=path.basename(parent).toLowerCase();
-  const dir=['curriculos','curriculos_personalizados'].includes(base)
-    ?path.join(base==='curriculos'?path.dirname(parent):parent,'curriculos_personalizados')
+  const candidateFolder=['curriculos','documentos','curriculos_personalizados'].includes(base);
+  const dir=candidateFolder
+    ?(base==='curriculos_personalizados'?parent:path.join(path.dirname(parent),'curriculos_personalizados'))
     :runtime.generated;
   fs.mkdirSync(dir,{recursive:true});
   return dir;
@@ -133,7 +134,8 @@ function bestSupport(blocks,job,limit=5){
 
 function formatSkill(value){
   const s=cleanLine(value); if(!s)return '';
-  return s.split(/\s+/).map(w=>w.length<=3?w.toUpperCase():w.charAt(0).toUpperCase()+w.slice(1).toLowerCase()).join(' ');
+  const connectors=new Set(['a','o','as','os','ao','aos','de','da','do','das','dos','e','em','para','por','com','sem']);
+  return s.split(/\s+/).map((w,i)=>connectors.has(w.toLowerCase())&&i>0?w.toLowerCase():w.length<=3?w.toUpperCase():w.charAt(0).toUpperCase()+w.slice(1).toLowerCase()).join(' ');
 }
 function cleanProjectText(value){
   let t=cleanLine(value).replace(/[|_=<>]+/g,' ').replace(/[{}\[\]"“”]+/g,' ').replace(/\s+/g,' ').trim();
@@ -158,28 +160,6 @@ function fallbackSummary(blocks,profile,job,skills){
   return parts.join(' ').slice(0,420);
 }
 
-async function polishProjects(rawProjects,job){
-  const source=rawProjects.map(cleanProjectText).filter(x=>x.length>=28).slice(0,4);
-  if(!source.length)return [];
-  const system='Reescreva descrições de projetos de portfólio usando somente os fatos explícitos no texto fornecido. Remova ruído de OCR. Não invente cliente, resultado, ferramenta, função, data ou contexto. Retorne apenas JSON.';
-  const prompt=`VAGA APENAS PARA ORDENAR RELEVÂNCIA: ${job.title||''}
-PROJETOS EXTRAÍDOS:
-${JSON.stringify(source.map((text,id)=>({id,text})))}
-Retorne {"projects":[{"id":0,"text":"frase profissional curta"}]}. Cada frase deve ter no máximo 180 caracteres e permanecer estritamente fiel ao projeto de origem.`;
-  try{
-    const parsed=parseJsonLoose(await askAI(system,prompt))||{};
-    const out=[];
-    for(const item of Array.isArray(parsed.projects)?parsed.projects:[]){
-      const id=Number(item.id); if(!Number.isInteger(id)||id<0||id>=source.length)continue;
-      const text=cleanLine(item.text||'');
-      if(text.length<24||text.length>200)continue;
-      if(!groundedSummary(text,source[id],source[id]))continue;
-      out.push({id,text});
-    }
-    return [...new Map(out.map(x=>[x.id,x.text])).values()].slice(0,3);
-  }catch{return [];}
-}
-
 async function buildTailoredContent(job,profile,sourceText){
   const blocks=buildBlocks(sourceText);
   const promptBlocks=sourceForPrompt(blocks,job);
@@ -196,8 +176,7 @@ Escolha somente IDs existentes. Para projects, prefira blocos de apoio/portfóli
 Escreva summary em 2 ou 3 frases, no máximo 380 caracteres, apoiado EXCLUSIVAMENTE nos IDs de summaryEvidence. O título da vaga pode aparecer apenas como objetivo/interesse, nunca como experiência.
 Retorne:
 {"summary":"","summaryEvidence":[],"education":[],"experience":[],"projects":[],"skills":[],"languages":[],"other":[]}`;
-  let parsed={};
-  try{parsed=parseJsonLoose(await askAI(system,prompt))||{};}catch{}
+  const parsed=parseJsonLoose(await askAI(system,prompt,{candidateId:profile.candidateId}))||{};
   const summaryEvidence=validIds(parsed.summaryEvidence,map,10);
   const evidence=evidenceText(summaryEvidence,map);
   let summary=cleanLine(parsed.summary||'');
@@ -208,7 +187,7 @@ Retorne:
   let projects=uniqTexts(validIds(parsed.projects,map,12),map,4,isProjectBlock).map(cleanProjectText).filter(x=>x.length>=28);
   let skills=uniqTexts(validIds(parsed.skills,map,16),map,10,x=>x.section==='skills');
   let languages=uniqTexts(validIds(parsed.languages,map,8),map,3,x=>x.source==='curriculo'&&isLanguageBlock(x));
-  let other=uniqTexts(validIds(parsed.other,map,8),map,4);
+  let other=uniqTexts(validIds(parsed.other,map,8),map,4,x=>!/@|\b(?:e-?mail|telefone|linkedin|instagram|github|portf[oó]lio)\b/i.test(x.text||''));
 
   if(!education.length)education=blocks.filter(x=>x.source==='curriculo'&&isEducationBlock(x)&&!isLanguageBlock(x)).map(x=>x.text).slice(0,7);
   const hay=norm(`${job.title||''} ${job.description||''}`);
@@ -220,7 +199,7 @@ Retorne:
     languages=primaryLang.length?primaryLang.slice(0,2):blocks.filter(isLanguageBlock).map(x=>x.text).slice(0,2);
   }
   if(!projects.length)projects=bestSupport(blocks,job,4).map(cleanProjectText).filter(x=>x.length>=28);
-  projects=await polishProjects([...new Set(projects)].slice(0,4),job);
+  projects=[...new Set(projects)].slice(0,3);
   if(!experience.length)experience=blocks.filter(x=>x.source==='curriculo'&&isExperienceBlock(x)).map(x=>x.text).slice(0,5);
 
   if(!summary)summary=fallbackSummary(blocks,profile,job,skills);

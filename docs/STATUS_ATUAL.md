@@ -34,7 +34,11 @@ Data: 18/09/2026
 - RioVagas reconhece resposta de candidatura anterior como `ALREADY_APPLIED` e não tenta novamente em retry.
 - XLSX e CSV: exportação validada.
 - Layout: sem overflow horizontal.
-- IA local: Ollama com modelo letswork-ai.
+- IA: somente sessão persistente do ChatGPT web no perfil dedicado, GPT-5.6 Sol High, controlada por CDP local em `127.0.0.1:9223`. Cada candidato mantém uma única conversa persistente salva em `dados\\chatgpt-conversations.json`. O Chromium dedicado é deslocado para fora da tela, retirado da barra de tarefas e mantido ativo via CDP, portanto só a janela do LetsWork fica visível.
+- Validação E2E de 18/09/2026: candidato fictício gerou 39 termos de busca; o mesmo chat persistente personalizou o currículo; PDF de 1 página foi gerado localmente; Playwright anexou o arquivo a um formulário local e o upload recebido teve tamanho idêntico (`UPLOAD_MATCH=true`); nenhuma vaga real foi enviada.
+- Pipeline de candidatura: até 6 páginas de vaga são coletadas em paralelo; o Sol personaliza um currículo por vez na conversa persistente; assim que cada PDF fica pronto ele entra numa fila consumida por 2 workers de candidatura, portanto uma vaga lenta não bloqueia a geração das próximas.
+- PDFs personalizados são salvos permanentemente em `dados\\candidatos\\<id>\\curriculos_personalizados`, não em `temp\\runtime_*`.
+- Benchmark isolado de 18/09/2026 após a mudança de pipeline: 4 vagas fictícias, 4 PDFs permanentes e 4 envios locais concluídos em 59,461 s, sem erros. A captura de resposta passou a usar `conversation-turn-N`, evitando falso travamento quando o ChatGPT recicla nós do DOM.
 - Authenticode do executável: deve ser Valid após cada build.
 
 ## Regras de ouro
@@ -52,6 +56,6 @@ Data: 18/09/2026
 - testes não contaminam histórico real;
 - não versionar dados de candidatos, bancos, certificados ou executáveis.
 
-- Corre��o de 18/09/2026: hist�rico de busca n�o bloqueia mais vagas com status `SELECTED` ou `ERROR`. Apenas `SENT` e `ALREADY_APPLIED` impedem a vaga de reaparecer em buscas futuras.
-- Preview de valida��o ap�s a corre��o: 2.554 coletadas, 2.534 recentes, 3.351 no pool, 525 compat�veis e 79 envi�veis sem login; somente 5 vagas j� realmente enviadas foram ignoradas pelo hist�rico.
+- Corre��o de 18/09/2026: hist�rico de busca n�o bloqueia mais vagas com status `SELECTED` ou `ERROR`. Apenas `SENT` e `ALREADY_APPLIED` impedem a vaga de reaparecer em buscas futuras.
+- Preview de valida��o ap�s a corre��o: 2.554 coletadas, 2.534 recentes, 3.351 no pool, 525 compat�veis e 79 envi�veis sem login; somente 5 vagas j� realmente enviadas foram ignoradas pelo hist�rico.
 

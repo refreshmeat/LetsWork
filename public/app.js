@@ -33,11 +33,11 @@ document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>acti
 async function loadAI(){
   try{
     const r=await fetch('/api/ai/status'),d=await r.json();
-    $('aiDot').className=`dot ${d.online&&d.installed?'online':'offline'}`;
-    $('aiLabel').textContent=d.online&&d.installed?'IA local pronta':'IA local indisponível';
-    $('aiModel').textContent=d.model||'Ollama local';
+    $('aiDot').className=`dot ${d.online?'online':'offline'}`;
+    $('aiLabel').textContent=d.online?'ChatGPT conectado':'ChatGPT indisponível';
+    $('aiModel').textContent=d.online?`${d.model||'GPT-5.6 Sol'} · ${d.level||'high'}`:(d.model||'GPT-5.6 Sol');
   }catch{
-    $('aiDot').className='dot offline'; $('aiLabel').textContent='IA local indisponível';
+    $('aiDot').className='dot offline'; $('aiLabel').textContent='ChatGPT indisponível';
   }
 }
 
@@ -141,8 +141,8 @@ async function refreshCandidateStats(detail=currentCandidate){
 
 function statusBadge(status,error=''){
   const s=String(status||'').toUpperCase();
-  const cls=s==='SENT'?'sent':s==='ERROR'?'error':s==='NEEDS_DATA'?'wait':s==='SKIPPED_LOGIN'?'wait':'ready';
-  const label=s==='SENT'?'ENVIADA':s==='NEEDS_DATA'?'AGUARDA DADO':s==='SKIPPED_LOGIN'?'IGNORADA · LOGIN':s||'PENDENTE';
+  const cls=s==='SENT'?'sent':s==='ERROR'?'error':['NEEDS_DATA','SKIPPED_LOGIN','PREPARING'].includes(s)?'wait':'ready';
+  const label=s==='SENT'?'ENVIADA':s==='PREPARING'?'GERANDO CURRÍCULO':s==='READY'?'PRONTO PARA ENVIO':s==='NEEDS_DATA'?'AGUARDA DADO':s==='SKIPPED_LOGIN'?'IGNORADA · LOGIN':s||'PENDENTE';
   return `<span class="status-badge ${cls}" title="${esc(error)}">${esc(label)}</span>`;
 }
 
@@ -238,8 +238,8 @@ async function pollStatus(){
   const r=await fetch(`/api/run/${runId}/status`); if(!r.ok) return;
   const d=await r.json(),c=d.counts||{};
   $('statStatus').textContent=d.status||'Processando';
-  notice('applyStatus',`Enviadas: ${c.SENT||0} · Simulação/prontas: ${c.READY||0} · Erros: ${c.ERROR||0} · Aguardando dado: ${c.NEEDS_DATA||0} · Ignoradas por login: ${c.SKIPPED_LOGIN||0}`);
-  if(d.status==='DONE'||String(d.status).startsWith('ERROR')){
+  notice('applyStatus',`Enviadas: ${c.SENT||0} · Gerando currículo: ${c.PREPARING||0} · Prontas para envio: ${c.READY||0} · Erros: ${c.ERROR||0} · Aguardando dado: ${c.NEEDS_DATA||0} · Ignoradas por login: ${c.SKIPPED_LOGIN||0}`);
+  if(d.status==='DONE'||d.status==='CANCELLED'||String(d.status).startsWith('ERROR')){
     clearInterval(pollTimer);pollTimer=null;$('applyBtn').disabled=false;$('retryBtn').disabled=false;
     await refreshApplications();await loadCandidates();renderCandidates();
   }

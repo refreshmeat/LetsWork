@@ -47,9 +47,11 @@ function inferredTerms(profile) {
 }
 function genericProfileTerms(profile){
   const primary=String(profile.rawText||'').split(/\n=== DOCUMENTO DE APOIO:/i)[0];
-  const name=norm(profile.name||'');
+  const lines=primary.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  const inferredName=!profile.name&&lines[0]&&/^[A-Za-zÀ-ÿ' -]{4,60}$/.test(lines[0])&&lines[0].split(/\s+/).length>=2&&lines[0].split(/\s+/).length<=5?lines[0]:'';
+  const name=norm(profile.name||inferredName);
   const bad=/^(sobre mim|perfil|objetivo|formac|educa|skills?|habilidades?|telefone|e-?mail|linkedin|portfolio|cursos?|ensino m[eé]dio|gradua[cç][aã]o)\b/i;
-  const roles=primary.split(/\r?\n/).map(x=>x.trim()).filter(Boolean).filter(x=>{
+  const roles=lines.filter(x=>{
     const n=norm(x); if(!n||n===name||bad.test(x))return false;
     if(/@|https?:|www\.|\+?\d{2}.*\d{4}|\b(?:rj|sp|mg|es|pr|sc|rs|ba|pe|ce|df)\b.*-/.test(n))return false;
     if(x.length>55||x.split(/\s+/).length>6)return false;
@@ -82,37 +84,16 @@ export async function buildSearchTerms(profile, filters) {
   const typed=String(filters.area||'').split(/[,;/]/).map(x=>x.trim()).filter(Boolean);
   const curriculum=compactProfessionalText(profile);
   const basis=typed.length?`ÁREA PRETENDIDA: ${typed.join(', ')}\nCURRÍCULO: ${curriculum}`:curriculum;
-  const generic=genericProfileTerms(profile);
-  const fallback=[...(typed.length?typed:[...inferredTerms(profile),...generic]),...relatedTerms(basis)];
-  let generated=[],exclusions=[];
-  const system='Você é o planejador de busca do LetsWork. Gere uma família AMPLA e DIVERSA de cargos plausíveis para o candidato. Use somente fatos profissionais comprovados e a área pretendida informada. Não invente formação, licença, registro profissional, experiência ou senioridade. Não eleve credenciais: técnico de enfermagem não vira enfermeiro; estudante não vira profissional regulamentado; auxiliar não vira especialista. Use nomes CURTOS de cargos realmente usados em anúncios no Brasil, em português do Brasil quando houver termo corrente em português. Não use ferramentas, idiomas, cidades, empresas ou habilidades isoladas como termos de busca. Retorne somente JSON.';
-  const prompt=`DADOS VERIFICADOS:\n${String(basis).slice(0,3200)}\n\nNÍVEL DE EXPERIÊNCIA DESEJADO: ${filters.experienceLevel||'entry'}\nRetorne exatamente este formato: {"direct":[...],"adjacent":[...],"entry":[...],"exclude":[...]}. direct: 6 a 10 cargos diretamente ligados ao perfil. adjacent: 6 a 10 funções próximas onde as mesmas competências são úteis. entry: 6 a 10 cargos de entrada, estágio, assistente, auxiliar, aprendiz ou júnior quando compatíveis. exclude: 0 a 8 títulos de vagas que podem compartilhar palavras com a área mas pertencem claramente a outra profissão; não coloque funções adjacentes plausíveis. Cada item deve ter no máximo 5 palavras. Evite duplicatas e variações cosméticas.`;
-  try{
-    const text=await Promise.race([askAI(system,prompt),delay(40000).then(()=> '')]);
-    const parsed=parseJsonLoose(text);
-    const buckets=[parsed?.direct,parsed?.adjacent,parsed?.entry].filter(Array.isArray);
-    const raw=buckets.flat().map(x=>String(x).trim()).filter(Boolean);
-    generated=[...new Set(raw.filter(x=>!obviousUnsafeTerm(x,basis)).filter(x=>!/^(?:estudante|tecn[oó]logo|bacharel|graduando|graduanda|formado|formada|curso de)\b/i.test(x)))];
-    if(Array.isArray(parsed?.exclude)) exclusions=[...new Set(parsed.exclude.map(x=>String(x).trim()).filter(x=>x.length>=3))].slice(0,8);
-  }catch{}
-  if(generated.length){
-    try{
-      const check=await Promise.race([askAI('Você valida termos de busca de vagas. Marque SOMENTE termos claramente incompatíveis com o perfil ou que exijam formação, registro, licença ou senioridade não comprovados. Não bloqueie funções adjacentes plausíveis. Retorne somente JSON.',`PERFIL VERIFICADO:\n${String(basis).slice(0,2800)}\n\nTERMOS:\n${JSON.stringify(generated)}\n\nRetorne {"blocked":[...]}.`),delay(10000).then(()=> '')]);
-      const parsed=parseJsonLoose(check); if(Array.isArray(parsed?.blocked)){const blocked=new Set(parsed.blocked.map(norm));generated=generated.filter(x=>!blocked.has(norm(x)));}
-    }catch{}
-  }
-  if(generated.length<12){
-    const seeds=[...new Set([...typed,...generic,...generated.slice(0,4)])].slice(0,6);
-    if(seeds.length){
-      try{
-        const extra=await Promise.race([askAI('Expanda cargos-semente em nomes CURTOS e comuns de vagas no Brasil. Inclua sinônimos e funções adjacentes plausíveis, sem elevar formação, licença ou senioridade. Retorne somente JSON.',`PERFIL/OBJETIVO:\n${String(basis).slice(0,1800)}\n\nCARGOS-SEMENTE: ${JSON.stringify(seeds)}\nRetorne {"terms":[...]} com 12 a 18 cargos distintos.`),delay(10000).then(()=> '')]);
-        const parsed=parseJsonLoose(extra); if(Array.isArray(parsed?.terms)){const more=parsed.terms.map(x=>String(x).trim()).filter(Boolean).filter(x=>!obviousUnsafeTerm(x,basis));generated=[...new Set([...generated,...more])];}
-      }catch{}
-    }
-  }
-  const mixed=[],max=Math.max(generated.length,fallback.length);
-  for(let i=0;i<max;i++){if(generated[i])mixed.push(generated[i]);if(fallback[i])mixed.push(fallback[i]);}
-  const final=[...new Set([...typed,...mixed].map(x=>String(x).trim()).filter(Boolean))].slice(0,40);
+  const fallback=[...(typed.length?typed:inferredTerms(profile)),...genericProfileTerms(profile),...relatedTerms(basis)];
+  const system='Você é o planejador de busca do LetsWork. Em UMA ÚNICA RESPOSTA, gere e revise uma família ampla de cargos plausíveis para o candidato. Use somente fatos profissionais comprovados e a área pretendida. Não invente formação, licença, registro, experiência ou senioridade. Não eleve credenciais. Use nomes curtos de cargos realmente usados em anúncios no Brasil. Antes de responder, elimine internamente duplicatas, variações cosméticas e funções incompatíveis. Retorne somente JSON.';
+  const prompt=`DADOS VERIFICADOS:\n${String(basis).slice(0,3600)}\n\nNÍVEL DE EXPERIÊNCIA: ${filters.experienceLevel||'entry'}\nGere de 24 a 32 cargos distintos, misturando funções diretas, adjacentes e de entrada compatíveis. Cada termo deve ter no máximo 5 palavras. Também liste até 8 títulos claramente incompatíveis. Retorne exatamente {"terms":[...],"exclude":[...]}.`;
+  const text=await askAI(system,prompt,{candidateId:profile.candidateId});
+  const parsed=parseJsonLoose(text);
+  const raw=Array.isArray(parsed?.terms)?parsed.terms.map(x=>String(x).trim()).filter(Boolean):[];
+  const generated=[...new Set(raw.filter(x=>!obviousUnsafeTerm(x,basis)).filter(x=>!/^(?:estudante|tecn[oó]logo|bacharel|graduando|graduanda|formado|formada|curso de)\b/i.test(x)))];
+  if(generated.length<12)throw new Error('ChatGPT não gerou termos de busca suficientes');
+  const exclusions=Array.isArray(parsed?.exclude)?[...new Set(parsed.exclude.map(x=>String(x).trim()).filter(x=>x.length>=3))].slice(0,8):[];
+  const final=[...new Set([...typed,...generated,...fallback].map(x=>String(x).trim()).filter(Boolean))].slice(0,40);
   final.exclusions=exclusions;
   return final;
 }
