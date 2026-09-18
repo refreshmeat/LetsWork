@@ -14,6 +14,12 @@ function absolute(href,base){
 function hostname(value){
   try{return new URL(value).hostname.toLowerCase();}catch{return '';}
 }
+function linkedInJobId(value){
+  try{
+    const u=new URL(value);
+    return u.searchParams.get('currentJobId')||u.pathname.match(/-(\d{8,})(?:\/|$)/)?.[1]||u.pathname.match(/\/(\d{8,})(?:\/|$)/)?.[1]||'';
+  }catch{return String(value||'').match(/(\d{8,})/)?.[1]||'';}
+}
 function extractApplyLinks(html,base){
   const out=[];
   const anchor=/<a\b([^>]*?)href=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/a>/gi;
@@ -22,8 +28,12 @@ function extractApplyLinks(html,base){
     const href=absolute(m[2],base), context=strip(`${m[1]} ${m[3]} ${m[4]}`);
     if(href&&!/^mailto:|^tel:|^javascript:/i.test(href)&&(applyTextRx.test(context)||applyPathRx.test(href))) out.push(href);
   }
-  const jsonRx=/(?:applyUrl|applicationUrl|apply_url|application_url)["']?\s*[:=]\s*["']([^"']+)["']/gi;
+  const jsonRx=/(?:applyUrl|applicationUrl|apply_url|application_url|externalApplyUrl|external_apply_url|offsiteApplyUrl|offsite_apply_url|companyApplyUrl|company_apply_url|jobApplyUrl|job_apply_url)["']?\s*[:=]\s*["']([^"']+)["']/gi;
   while((m=jsonRx.exec(String(html||'')))){const href=absolute(m[1].replace(/\\u002F/g,'/').replace(/\\\//g,'/'),base);if(href)out.push(href);}
+  const attrRx=/(?:data-)?(?:apply-url|application-url|external-apply-url|offsite-apply-url)=["']([^"']+)["']/gi;
+  while((m=attrRx.exec(String(html||'')))){const href=absolute(m[1],base);if(href)out.push(href);}
+  const escapedRx=/(https?:\\?\/\\?\/[^"'<>\\s]+(?:apply|application|candidat)[^"'<>\\s]*)/gi;
+  while((m=escapedRx.exec(String(html||'')))){const href=absolute(m[1].replace(/\\u002F/g,'/').replace(/\\\//g,'/'),base);if(href)out.push(href);}
   return [...new Set(out)];
 }async function fetchPage(url,timeout=6500){
   try{
@@ -61,6 +71,9 @@ async function followApplication(url,depth=0){
   if(applyPathRx.test(page.url))return {sendable:1,reason:''};
   return {sendable:0,reason:'UNVERIFIED_LOGIN'};
 }export function initialSendability(job){
+  const source=String(job?.source||'');
+  // LinkedIn é rechecado a cada busca: bloqueios antigos podem ter vindo de authwall antes de descobrirmos o link externo.
+  if(job?.requiresLogin===true&&source==='LinkedIn')return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false};
   if(job?.requiresLogin===true)return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};
   if(job?.loginFreeCandidate===true)return {sendable:1,reason:'',verified:true};
   return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false};
@@ -76,11 +89,21 @@ export async function probeJobSendability(job){
 
   const links=extractApplyLinks(first.html,first.url);
   if(source==='LinkedIn'){
-    const unwrap=x=>{try{const u=new URL(x);if(/(^|\.)linkedin\.com$/i.test(u.hostname)&&/redir|redirect/i.test(u.pathname)){for(const k of ['url','target','dest','destination']){const v=u.searchParams.get(k);if(v)return decodeURIComponent(v);}}return x;}catch{return x;}};
-    const external=links.map(unwrap).find(x=>!/linkedin\.com$/i.test(hostname(x))&&!/\.linkedin\.com$/i.test(hostname(x)));
-    if(external){const r=await followApplication(external);return {...r,verified:r.reason!=='UNVERIFIED_LOGIN'};}
-    if(loginEvidence(first)||/sign-in-modal|authwall|sign in to apply|log in to apply/i.test(first.html))return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};
-    if(emailGateEvidence(first))return {sendable:0,reason:'EMAIL_REQUIRED',verified:true};
+    const unwrap=x=>{try{const u=new URL(x);if(/(^|\.)linkedin\.com$/i.test(u.hostname)&&/redir|redirect|externalApply/i.test(u.pathname)){for(const k of ['url','target','dest','destination','redirect']){const v=u.searchParams.get(k);if(v)return decodeURIComponent(v);}}return x;}catch{return x;}};
+    const externalFrom=page=>extractApplyLinks(page?.html||'',page?.url||probeUrl).map(unwrap).find(x=>!/linkedin\.com$/i.test(hostname(x))&&!/\.linkedin\.com$/i.test(hostname(x)));
+    let external=externalFrom(first);
+    let guest=null;
+    if(!external){
+      const id=linkedInJobId(job.url);
+      if(id){
+        guest=await fetchPage(`https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/${id}`,7000);
+        if(guest.ok)external=externalFrom(guest);
+      }
+    }
+    if(external){const r=await followApplication(external);return {...r,verified:r.reason!=='UNVERIFIED_LOGIN',externalUrl:external};}
+    const combined=`${first.html||''} ${guest?.html||''}`;
+    if(loginEvidence(first)||/sign-in-modal|authwall|sign in to apply|log in to apply/i.test(combined))return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};
+    if(emailGateEvidence(first)||(guest&&emailGateEvidence(guest)))return {sendable:0,reason:'EMAIL_REQUIRED',verified:true};
     return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false};
   }
   if(loginEvidence(first))return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};

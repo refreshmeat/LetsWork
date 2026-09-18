@@ -8,6 +8,7 @@ import { searchVagasCom } from '../sources/vagascom.mjs';
 import { searchAdzuna } from '../sources/adzuna.mjs';
 import { searchLinkVagas } from '../sources/linkvagas.mjs';
 import { searchLinkedIn } from '../sources/linkedin.mjs';
+import { searchTramper, searchHuanna, searchEmpregoDaqui, searchBeaVagas } from '../sources/directsites.mjs';
 import { askAI, parseJsonLoose } from './ai.mjs';
 
 const CHROME = process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -421,11 +422,15 @@ export async function searchJobs(profile, filters, suppliedTerms=null) {
   const secondaryWork=Promise.all([
     timed('LinkedIn',searchLinkedIn(terms,filters,Math.min(1600,perSource))),
     timed('Gupy',searchGupy(terms,filters,Math.min(1200,perSource))),
+    timed('Tramper',prioritySource('Tramper',searchTramper(terms,filters,Math.min(800,perSource)),terms,filters,Math.min(800,perSource))),
+    timed('Huanna',prioritySource('Huanna',searchHuanna(terms,filters,Math.min(500,perSource)),terms,filters,Math.min(500,perSource))),
+    timed('BeaVagas',prioritySource('BeaVagas',searchBeaVagas(terms,filters,Math.min(500,perSource)),terms,filters,Math.min(500,perSource))),
+    timed('EmpregoDaqui',prioritySource('EmpregoDaqui',searchEmpregoDaqui(terms,filters,Math.min(500,perSource)),terms,filters,Math.min(500,perSource))),
     wantsRemote?timed('Remotive',searchRemotive(terms,Math.min(300,perSource))):Promise.resolve([]),
     timed('Jooble',searchJooble(terms,filters,Math.min(900,perSource))),
     timed('Adzuna',searchAdzuna(terms,filters,Math.min(900,perSource)))
   ]);
-  const [[vagas,rio],[linkedin,gupy,remotive,jooble,adzuna]]=await Promise.all([primaryWork,secondaryWork]);
+  const [[vagas,rio],[linkedin,gupy,tramper,huanna,beavagas,empregodaqui,remotive,jooble,adzuna]]=await Promise.all([primaryWork,secondaryWork]);
   const [empregos,linkvagas]=await Promise.all([
     wantsRj?timed('EmpregosRJ',wordpressSearch('https://empregosrj.com.br/','EmpregosRJ',terms,Math.min(600,perSource),filters)):Promise.resolve([]),
     timed('Link Vagas',searchLinkVagas(terms,filters,Math.min(700,perSource)))
@@ -433,7 +438,7 @@ export async function searchJobs(profile, filters, suppliedTerms=null) {
   // Coleta ampla só com listagens/cards. A página completa continua reservada
   // para o processamento da vaga; não existe mais teto de 500 na coleta.
   const wordpress=interleave(rio,empregos).slice(0,perSource);
-  const pooled=dedupeJobs(interleave(wordpress,vagas,linkedin,gupy,linkvagas,jooble,adzuna,remotive));
+  const pooled=dedupeJobs(interleave(wordpress,vagas,tramper,huanna,beavagas,empregodaqui,linkedin,gupy,linkvagas,jooble,adzuna,remotive));
   console.log(`[busca] pool deduplicado: ${pooled.length}`);
   return pooled.slice(0,poolCap);
 }
