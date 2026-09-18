@@ -54,15 +54,23 @@ O produto é um aplicativo desktop local para Windows. Ele deve:
 - Assinatura local Authenticode com certificado “LetsWork Local Code Signing”.
 
 ### Dados
+Raiz única do LetsWork:
+
+`%USERPROFILE%\LetsWork\`
+
+Código local:
+
+`%USERPROFILE%\LetsWork\app\`
+
 Banco principal:
 
-`%USERPROFILE%\Documents\LetsWork\data\letswork.sqlite`
+`%USERPROFILE%\LetsWork\dados\data\letswork.sqlite`
 
 Pastas por candidato:
 
-`%USERPROFILE%\Documents\LetsWork\candidatos\<id>\`
+`%USERPROFILE%\LetsWork\dados\candidatos\<id>\`
 
-Cada candidato mantém currículo original, documentos de apoio, currículos personalizados, relatórios e sessões próprias.
+Cada candidato mantém currículo original, documentos de apoio, currículos personalizados, relatórios e sessões próprias. Nenhum dado operacional deve voltar para `Documents\LetsWork`.
 
 ### Tabelas relevantes
 - candidates
@@ -331,30 +339,39 @@ Também foram removidos limites antigos de largura em topbar/tabs/painel.
 Regra absoluta:
 nenhum fato pode ser inventado.
 
-### PDF
-Para currículo PDF:
-- inserir primeira página direcionada à vaga;
-- preservar currículo original completo nas páginas seguintes;
-- usar somente competências verificadas que realmente apareçam no perfil.
+### Arquitetura correta
 
-### DOCX
-Para DOCX:
-- preservar estrutura/layout;
-- alterar apenas trechos relevantes;
-- limitar crescimento do texto;
-- fallback mantém original caso edição segura não seja possível.
+O LetsWork não depende de editar o arquivo original. O pipeline é genérico:
 
-### Teste realizado em 17/09/2026
-Foram escolhidas três vagas diferentes e gerados três currículos.
+1. extrair texto diretamente quando o arquivo possui camada de texto;
+2. detectar texto ruim, fragmentado ou insuficiente;
+3. em PDF/imagem escaneada, renderizar páginas e usar OCR;
+4. estruturar fatos reais de currículo e documentos de apoio;
+5. usar a vaga somente para selecionar, ordenar e resumir fatos relevantes;
+6. reconstruir um currículo novo e profissional para aquela vaga;
+7. validar o PDF gerado antes de permitir candidatura.
 
-Resultados:
-- 3 arquivos diferentes;
-- hashes SHA-256 diferentes;
-- primeira página com o título específico de cada vaga;
-- currículo original preservado depois da capa;
-- estratégia `pdf-tailored-cover+original`.
+É proibido inserir uma “capa direcionada” na frente do currículo original e chamar isso de personalização.
 
-As três vagas foram depois usadas no fluxo de candidatura em modo dry-run e retornaram READY, cada uma com seu próprio arquivo personalizado.
+### Portfólio
+
+O portfólio visual não deve ser reconstruído nem perder imagens.
+OCR/extrator é usado apenas para compreender projetos e fatos.
+No arquivo final:
+- currículo personalizado vem primeiro;
+- PDF original do portfólio é anexado integralmente depois;
+- imagens, layout e páginas do portfólio permanecem preservados.
+
+### Validação de 18/09/2026
+
+No perfil de teste:
+- OCR do portfólio recuperou 2.304 caracteres;
+- currículo reconstruído teve 1 página;
+- portfólio original teve 18 páginas;
+- arquivo final teve 19 páginas;
+- renderização da página original do portfólio e da página anexada gerou SHA-256 idêntico, confirmando preservação visual.
+
+Currículos gerados pela lógica antiga de capa foram considerados inválidos e removidos durante a limpeza.
 
 ## 10. Candidatura
 
@@ -415,7 +432,7 @@ Estados de bloqueio devem diferenciar LOGIN e EMAIL.
 
 Objetivo é funcionar sem contratação de banco externo.
 
-Dados ficam em Documents\LetsWork.
+Dados ficam em `%USERPROFILE%\LetsWork\dados`. A pasta `Documents` não deve receber dados operacionais do LetsWork.
 
 Ao excluir candidato:
 - cadastro;

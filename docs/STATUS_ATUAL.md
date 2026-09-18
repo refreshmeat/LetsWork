@@ -25,8 +25,13 @@ Data: 18/09/2026
 - Em teste isolado, 120 vagas LinkedIn foram verificadas com a lógica aprofundada; nenhuma delas possuía destino externo comprovadamente sem login. Elas não foram falsamente promovidas a enviáveis.
 - Histórico por candidato: ativo.
 - Modo preview: não grava vaga como “já apresentada”.
-- Personalização de currículo por vaga: validada em 3 vagas diferentes.
-- Candidatura dry-run: 3/3 READY, cada uma usando currículo específico.
+- Dados locais consolidados em `%USERPROFILE%\LetsWork\dados`; código local em `%USERPROFILE%\LetsWork\app`.
+- Currículo personalizado: o PDF original nunca é “editado por cima” nem recebe capa. O conteúdo é extraído; PDF-imagem/scan cai para OCR; os fatos são estruturados; um currículo novo é reconstruído para cada vaga.
+- Portfólio: OCR serve apenas para entendimento factual. O PDF visual original é anexado inteiro depois do currículo personalizado, preservando imagens e diagramação.
+- Validação de 18/09/2026: OCR do portfólio recuperou 2.304 caracteres; currículo gerado teve 1 página; portfólio original anexado teve 18 páginas; total 19.
+- A página 1 do portfólio original e a página correspondente do PDF combinado produziram o mesmo SHA-256 renderizado, confirmando preservação visual.
+- Candidatura automática usa Playwright + Chromium headless; Google Chrome comum não é usado no fluxo automático.
+- RioVagas reconhece resposta de candidatura anterior como `ALREADY_APPLIED` e não tenta novamente em retry.
 - XLSX e CSV: exportação validada.
 - Layout: sem overflow horizontal.
 - IA local: Ollama com modelo letswork-ai.

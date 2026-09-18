@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-const ROOT = process.env.LETSWORK_DATA_ROOT || path.join(os.homedir(),'Documents','LetsWork');
+const ROOT = process.env.LETSWORK_DATA_ROOT || path.join(os.homedir(),'LetsWork','dados');
 export const storage = {
   root: ROOT,
   data: path.join(ROOT,'data'),

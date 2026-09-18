@@ -31,7 +31,18 @@ function pageTextLines(content){
   return [...rows.entries()].sort((a,b)=>b[0]-a[0])
     .map(([,parts])=>parts.sort((a,b)=>a.x-b.x).map(x=>x.text).join(' ').replace(/\s+/g,' ').trim())
     .filter(Boolean).join('\n');
-}async function readPdf(file){
+}function poorPdfText(text){
+  const clean=String(text||'').trim();
+  if(clean.replace(/\s/g,'').length<80)return true;
+  const tokens=clean.split(/\s+/).filter(Boolean);
+  if(tokens.length<12)return true;
+  const singles=tokens.filter(x=>/^[A-Za-zÀ-ÿ]$/.test(x)).length;
+  const normal=tokens.filter(x=>/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9.,;:/()#+-]{2,}$/.test(x)).length;
+  const singleRatio=singles/Math.max(1,tokens.length);
+  const normalRatio=normal/Math.max(1,tokens.length);
+  return singleRatio>0.22 || normalRatio<0.32;
+}
+async function readPdf(file){
   const data=new Uint8Array(fs.readFileSync(file));
   const doc=await pdfjs.getDocument({data,disableWorker:true}).promise;
   const pages=[];
@@ -40,17 +51,19 @@ function pageTextLines(content){
     pages.push(pageTextLines(await page.getTextContent()));
   }
   const text=pages.join('\n').trim();
-  if(text.replace(/\s/g,'').length>=80) return text;
+  if(!poorPdfText(text)) return text;
   return withOcrWorker(async worker=>{
     const chunks=[];
-    for(let i=1;i<=Math.min(doc.numPages,8);i++){
+    for(let i=1;i<=Math.min(doc.numPages,12);i++){
       const page=await doc.getPage(i);
-      const viewport=page.getViewport({scale:1.8});
+      const viewport=page.getViewport({scale:2.1});
       const canvas=createCanvas(Math.ceil(viewport.width),Math.ceil(viewport.height));
       await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
-      chunks.push((await worker.recognize(canvas.toBuffer('image/png'))).data.text||'');
+      const recognized=(await worker.recognize(canvas.toBuffer('image/png'))).data.text||'';
+      chunks.push(recognized);
     }
-    return chunks.join('\n').trim();
+    const ocr=chunks.join('\n').trim();
+    return ocr.replace(/\r/g,'').replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
   });
 }
 

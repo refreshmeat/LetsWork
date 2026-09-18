@@ -253,7 +253,7 @@ async function processRun(runId,onlyErrors=false) {
     while(cursor<jobs.length){
       const job=jobs[cursor++];
       const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
-      if(old?.status==='SENT') continue;
+      if(['SENT','ALREADY_APPLIED'].includes(old?.status)) continue;
       try{
         let tailoredFile='';
         const result=await applyToJob(job,resume.stored_path,profile,prefs,{dryRun,prepareResume:async enrichedJob=>{
@@ -262,7 +262,7 @@ async function processRun(runId,onlyErrors=false) {
         db.prepare(`INSERT INTO applications(run_id,job_id,status,tailored_file,error,submitted_at)
           VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,job_id) DO UPDATE SET status=excluded.status,
           tailored_file=excluded.tailored_file,error=excluded.error,submitted_at=excluded.submitted_at`)
-          .run(runId,job.id,result.status,tailoredFile,result.error||'',result.status==='SENT'?new Date().toISOString():null);
+          .run(runId,job.id,result.status,tailoredFile,result.error||'',['SENT','ALREADY_APPLIED'].includes(result.status)?new Date().toISOString():null);
         if(result.status==='SKIPPED_LOGIN') db.prepare("UPDATE jobs SET sendable=0,blocked_reason='LOGIN_REQUIRED',selected=0,batch_no=0 WHERE id=?").run(job.id);
         if(job.source_key) db.prepare(`UPDATE candidate_job_history SET status=?,last_seen_at=CURRENT_TIMESTAMP,last_run_id=?
           WHERE candidate_id=? AND fingerprint=?`).run(result.status,runId,run.candidate_id,job.source_key);

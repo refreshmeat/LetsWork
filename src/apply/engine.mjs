@@ -5,8 +5,25 @@ import { runtime } from '../runtime.mjs';
 import { ensureCandidateDirs } from '../storage.mjs';
 import { askAI, parseJsonLoose } from '../services/ai.mjs';
 
-const CHROME=process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
-const profileDir=id=>id?path.join(ensureCandidateDirs(id).sessions,'chrome-profile'):path.join(runtime.sessions,'chrome-profile');
+function playwrightChromiumPath(){
+  const explicit=process.env.PLAYWRIGHT_CHROMIUM_PATH;
+  if(explicit&&fs.existsSync(explicit))return explicit;
+  try{
+    const bundled=chromium.executablePath();
+    if(bundled&&fs.existsSync(bundled))return bundled;
+  }catch{}
+  const root=process.env.LOCALAPPDATA?path.join(process.env.LOCALAPPDATA,'ms-playwright'):'';
+  if(root&&fs.existsSync(root)){
+    const candidates=fs.readdirSync(root,{withFileTypes:true})
+      .filter(x=>x.isDirectory()&&/^chromium-\d+$/i.test(x.name))
+      .sort((a,b)=>b.name.localeCompare(a.name,undefined,{numeric:true}))
+      .map(x=>path.join(root,x.name,'chrome-win64','chrome.exe'))
+      .filter(fs.existsSync);
+    if(candidates.length)return candidates[0];
+  }
+  throw new Error('Chromium do Playwright não encontrado. A candidatura foi bloqueada para não abrir navegador comum.');
+}
+const profileDir=id=>id?path.join(ensureCandidateDirs(id).sessions,'chromium-profile'):path.join(runtime.sessions,'chromium-profile');
 let loginCandidateId=null;
 const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 let loginContext=null;
@@ -15,7 +32,7 @@ export async function openLoginSession(candidateId=null){
   if(loginContext && loginCandidateId===candidateId) return {ok:true,alreadyOpen:true};
   if(loginContext) await closeLoginSession();
   const dir=profileDir(candidateId); loginCandidateId=candidateId;
-  loginContext=await chromium.launchPersistentContext(dir,{executablePath:CHROME,headless:false,args:['--no-sandbox']});
+  loginContext=await chromium.launchPersistentContext(dir,{executablePath:playwrightChromiumPath(),headless:false,args:['--no-sandbox']});
   const pages=loginContext.pages(); const first=pages[0] || await loginContext.newPage();
   await first.goto('https://portal.gupy.io/',{waitUntil:'domcontentloaded',timeout:30000}).catch(()=>{});
   const second=await loginContext.newPage();
@@ -243,6 +260,9 @@ async function applyRioVagas(page,job,resumeFile,profile,prefs,dryRun){
   if(dryRun) return {status:'READY',error:''};
   const form=page.locator('form.form-candidato').first();if(!await form.count()) return {status:'ERROR',error:'Formulário RioVagas não encontrado'};
   const result=await page.evaluate(async()=>{const f=document.querySelector('form.form-candidato');const fd=new FormData(f);fd.set('form_submit','confirm');const r=await fetch(f.action||location.href,{method:'POST',body:fd,credentials:'same-origin'});return{url:r.url,status:r.status,text:await r.text()};});
+  const normalized=norm(`${result.text||''} ${result.url||''}`);
+  const already=/ja\s+(?:se\s+)?candidat|candidatura\s+ja\s+(?:foi\s+)?realizada|curriculo\s+ja\s+(?:foi\s+)?enviado|voce\s+ja\s+(?:enviou|participou)|candidato\s+ja\s+cadastrado\s+(?:nesta|para esta)\s+vaga/.test(normalized);
+  if(already)return {status:'ALREADY_APPLIED',error:'Candidatura já registrada anteriormente no RioVagas'};
   const ok=/Curr[ií]culo enviado com sucesso/i.test(result.text)||/curriculo=enviado/i.test(result.url);
   return ok?{status:'SENT',error:''}:{status:'ERROR',error:`Envio RioVagas sem confirmação final (HTTP ${result.status})`};
 }
@@ -279,7 +299,7 @@ async function applyGeneric(page,job,resumeFile,profile,prefs,dryRun){
   let browser=null,context=null,page=null,ownsContext=false;
   const effectivePrefs=resolvedPrefs(job,prefs);
   try{
-    browser=await chromium.launch({executablePath:CHROME,headless:dryRun,args:['--no-sandbox']});
+    browser=await chromium.launch({executablePath:playwrightChromiumPath(),headless:true,args:['--no-sandbox','--disable-gpu']});
     context=await browser.newContext(); ownsContext=true;
     page=await context.newPage();
     await findApplicationPage(page,job);

@@ -60,7 +60,7 @@ async function waitForServer(){
 }
 
 async function createWindow(){
-  const dataRoot=path.join(app.getPath('documents'),'LetsWork');
+  const dataRoot=path.join(app.getPath('home'),'LetsWork','dados');
   fs.mkdirSync(dataRoot,{recursive:true});
   logFile=path.join(dataRoot,'desktop.log');
   process.env.LETSWORK_DATA_ROOT=dataRoot;
