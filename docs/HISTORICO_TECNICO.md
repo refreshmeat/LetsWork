@@ -532,3 +532,49 @@ Antes de “melhorar” ranking, login, PCD, localização ou histórico:
 6. registrar aqui a decisão.
 
 O objetivo do LetsWork não é produzir a heurística mais esperta possível. É produzir um sistema previsível, amplo, seguro e útil para pessoas reais.
+
+
+## 20. Atualizações de 18/09/2026 — novas fontes e verificação aprofundada
+
+Estas alterações já fazem parte da versão atual do LetsWork:
+
+- Tramper adicionado como nova fonte de vagas.
+- Huanna adicionada como nova fonte de vagas.
+- BeaVagas adicionada como nova fonte de vagas.
+- EmpregoDaqui adicionado como nova fonte de coleta.
+- LinkedIn e Gupy permanecem ativos e não são excluídos por domínio inteiro.
+- LinkedIn ganhou uma verificação mais profunda antes de uma vaga ser classificada como login obrigatório:
+  - página pública da vaga;
+  - endpoint público/guest do anúncio;
+  - campos JSON de candidatura externa;
+  - atributos HTML de candidatura;
+  - URLs escapadas;
+  - redirects para páginas externas da empresa.
+- Classificações antigas de LinkedIn podem ser rechecadas, evitando que um falso bloqueio histórico impeça uma vaga externa sem login de ser aproveitada.
+- EmpregoDaqui não é automaticamente tratado como enviável quando o único canal é WhatsApp. A vaga pode ser coletada, mas não entra como candidatura automática até existir um fluxo seguro e comprovado.
+- Tramper, Huanna e BeaVagas só contribuem para a fila quando a vaga for recente, compatível e atender às regras de envio.
+- Vagas.com continua sendo usado quando responde, mas sua falha nunca pode impedir a busca nas demais fontes.
+- A regra central continua a mesma: coletar amplamente, ranquear depois e só colocar na fila automática vagas comprovadamente sem login, criação de conta ou barreira de autenticação por e-mail.
+
+### Testes desta atualização
+
+No preview completo de 18/09/2026:
+- 2.643 vagas foram coletadas;
+- 2.592 eram recentes;
+- 3.353 estavam no pool persistente;
+- 516 foram consideradas compatíveis;
+- 72 eram enviáveis sem login naquele recorte específico;
+- fontes frescas incluíram RioVagas 2.200, LinkedIn 240, Vagas.com 140, Gupy 40, Remotive 15, BeaVagas 6, Huanna 1 e Link Vagas 1.
+
+Também foi executado um teste isolado em 120 vagas do LinkedIn usando a nova verificação aprofundada. Nenhuma das 120 possuía, naquele momento, destino externo comprovadamente sem login. O resultado importante é que o LetsWork agora procura esse destino antes de bloquear a vaga.
+
+### Build validado
+
+Após essas mudanças:
+- o executável foi rebuildado;
+- a assinatura Authenticode permaneceu válida;
+- o backend respondeu HTTP 200;
+- a IA local letswork-ai permaneceu online;
+- o layout continuou sem overflow horizontal.
+
+Este bloco deve ser tratado como parte do histórico oficial do projeto e lido antes de futuras alterações em fontes, sendability ou regras de login.
