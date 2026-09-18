@@ -1,25 +1,18 @@
 import fs from 'fs';
 import path from 'path';
+import { storage } from './storage.mjs';
 
-const ROOT = process.cwd();
-const EXECUTIONS = path.join(ROOT, 'execucoes');
-const pad = n => String(n).padStart(2, '0');
-const now = new Date();
-const stamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-const session = path.join(EXECUTIONS, `EXECUCAO_${stamp}_${process.pid}`);
-
-export const runtime = {
-  root: ROOT,
-  executions: EXECUTIONS,
+const session=path.join(storage.temp,`runtime_${process.pid}`);
+export const runtime={
+  root:storage.root,
+  executions:storage.candidates,
   session,
-  data: path.join(session, 'data'),
-  uploads: path.join(session, 'uploads'),
-  generated: path.join(session, 'curriculos_personalizados'),
-  reports: path.join(session, 'relatorios'),
-  sessions: path.join(session, 'sessoes_navegador')
+  data:storage.data,
+  uploads:path.join(session,'uploads'),
+  generated:path.join(session,'generated'),
+  reports:path.join(session,'reports'),
+  sessions:path.join(session,'sessions')
 };
-
-for (const dir of Object.values(runtime)) {
-  if (typeof dir === 'string' && dir.startsWith(session)) fs.mkdirSync(dir, { recursive:true });
+for(const dir of [session,runtime.uploads,runtime.generated,runtime.reports,runtime.sessions]){
+  fs.mkdirSync(dir,{recursive:true});
 }
-fs.mkdirSync(EXECUTIONS, { recursive:true });

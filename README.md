@@ -1,32 +1,30 @@
-﻿# LetsWork
+# LetsWork
 
-AplicaÃ§Ã£o local para importar um currÃ­culo, buscar vagas compatÃ­veis, preparar versÃµes direcionadas e automatizar candidaturas com rastreamento de resultados.
+Aplicação desktop local para importar currículos, buscar vagas em volume, ranquear oportunidades compatíveis, gerar um currículo específico para cada vaga e automatizar candidaturas sem inventar dados do candidato.
 
-## Estado atual
+## Como funciona
 
-O MVP jÃ¡ possui interface local, leitura de PDF/DOCX/ZIP/texto, OCR para imagens e PDF escaneado, filtros de localizaÃ§Ã£o/remoto/PCD/CLT/PJ, busca em RioVagas e EmpregosRJ, suporte opcional Ã  API do Jooble, ranking, modo de simulaÃ§Ã£o, candidatura via Chrome/Playwright, retry e exportaÃ§Ã£o CSV/XLSX.
+O LetsWork mantém dados separados por candidato. A busca usa currículo, preferências e IA local para gerar uma família ampla de cargos e termos, coleta muito mais do que 500 vagas quando disponível, elimina duplicatas e incompatibilidades claras e ordena o resultado.
 
-A automaÃ§Ã£o nunca deve inventar formaÃ§Ã£o, experiÃªncia, habilidade, disponibilidade ou outro dado factual. Campos obrigatÃ³rios sem informaÃ§Ã£o confirmada ficam como `NEEDS_DATA`. CAPTCHA e autenticaÃ§Ã£o adicional tambÃ©m exigem intervenÃ§Ã£o manual.
+O limite de 500 vale para a fila final de melhores vagas enviáveis. Vagas que exigem login, criação de conta ou barreira de e-mail não entram nessa fila.
 
-## Executar
+RioVagas e Vagas.com são fontes prioritárias. LinkedIn e Gupy continuam sendo pesquisados, mas cada vaga é validada individualmente antes de ser considerada enviável.
 
-1. Instale Node.js 24+ e Google Chrome.
-2. Rode `npm install`.
-3. Copie `.env.example` para `.env` e configure apenas as integraÃ§Ãµes desejadas.
-4. Rode `npm start`.
-5. Abra `http://127.0.0.1:4317`.
+## IA e currículos
 
-## Dados locais e descarte
+O sistema usa regras determinísticas, Playwright e a IA local `letswork-ai` via Ollama.
 
-Cada inicializaÃ§Ã£o cria uma pasta nova em `execucoes/EXECUCAO_AAAAMMDD_HHMMSS_PID/`. Dentro dela ficam `data/`, `uploads/`, `curriculos_personalizados/`, `relatorios/` e `sessoes_navegador/`. O terminal mostra o caminho exato da pasta ao iniciar.
+Para cada vaga processada, o LetsWork gera uma versão direcionada do currículo usando somente fatos verificados. PDF recebe uma página inicial específica para a vaga e preserva o currículo original nas páginas seguintes.
 
-Depois de encerrar o script, essa pasta inteira pode ser apagada sem afetar o programa. Na prÃ³xima execuÃ§Ã£o outra pasta limpa serÃ¡ criada automaticamente. Assim nenhuma execuÃ§Ã£o precisa acumular banco, currÃ­culos personalizados ou relatÃ³rios antigos.
+## Dados e privacidade
 
-## Fluxo
+Os dados ficam em `Documentos\LetsWork`. Não é necessário contratar banco de dados ou serviço de nuvem.
 
-CurrÃ­culo â†’ extraÃ§Ã£o/OCR â†’ perfil â†’ filtros â†’ coleta â†’ deduplicaÃ§Ã£o â†’ compatibilidade â†’ currÃ­culo por vaga â†’ simulaÃ§Ã£o/envio â†’ tracker â†’ retry â†’ CSV/XLSX.
+Dados de candidatos, banco SQLite, relatórios, sessões de navegador, currículos gerados, executáveis e certificados não são versionados no Git.
 
-## Limites atuais
+## Documentação
 
-A preservaÃ§Ã£o de layout com alteraÃ§Ã£o de conteÃºdo estÃ¡ implementada de forma segura para DOCX. CurrÃ­culos PDF e formatos nÃ£o editÃ¡veis ainda sÃ£o preservados sem alteraÃ§Ã£o atÃ© existir uma estratÃ©gia genÃ©rica que nÃ£o destrua o design original. Novos sites devem entrar como adaptadores, preferindo API oficial e usando Playwright quando necessÃ¡rio.
+- [Histórico técnico, decisões, erros e correções](docs/HISTORICO_TECNICO.md)
+- [Status atual e validações](docs/STATUS_ATUAL.md)
 
+Antes de alterar busca, ranking, histórico ou autenticação, leia o histórico técnico. Ele existe especificamente para evitar regressões já resolvidas.

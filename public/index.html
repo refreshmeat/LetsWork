@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
@@ -7,116 +7,188 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-<main>
-  <div class="topline">
-    <div>
-      <h1>LetsWork</h1>
-      <div class="muted">Busca, adaptaÃ§Ã£o e candidatura local.</div>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <img class="brand-logo" src="/logo.png" alt="LetsWork">
+      <div><strong>LetsWork</strong><span>Automação local</span></div>
     </div>
-  </div>
-
-  <section class="card compact">
-    <div class="topline">
-      <div><strong>ExecuÃ§Ã£o atual</strong><div id="executionPath" class="muted">Carregando...</div></div>
-      <div class="actions no-margin">
-        <button id="openSession" type="button" class="secondary">Preparar login</button>
-        <button id="closeSession" type="button" class="secondary">Fechar sessÃ£o</button>
-        <button id="deleteExecution" type="button" class="danger">Encerrar e apagar execuÃ§Ã£o</button>
+    <button id="newCandidateBtn" class="primary full" type="button">+ Novo candidato</button>
+    <div class="side-label">Candidatos</div>
+    <div id="candidateList" class="candidate-list"></div>
+    <div class="sidebar-footer">
+      <div class="ai-state">
+        <span id="aiDot" class="dot"></span>
+        <div><strong id="aiLabel">Verificando IA</strong><span id="aiModel">Ollama local</span></div>
       </div>
     </div>
-    <div id="sessionStatus" class="status hidden"></div>
-  </section>
+  </aside>
 
-  <section class="card">
-    <h2>1. CurrÃ­culo</h2>
-    <form id="uploadForm">
-      <label>Arquivo do currÃ­culo
-        <input id="resumeFile" name="resume" type="file" required>
-      </label>
-      <div class="muted">PDF, DOCX, imagens com OCR, ZIP e formatos de texto. O original nunca Ã© sobrescrito.</div>
-      <div class="actions"><button type="submit">Importar e ler</button></div>
-    </form>
-    <div id="uploadStatus" class="status hidden"></div>
-  </section>
-  <section id="profileCard" class="card hidden">
-    <h2>2. Dados identificados</h2>
-    <div class="profile">
-      <label class="wide">Nome<input id="pName"></label>
-      <label>E-mail<input id="pEmail" type="email"></label>
-      <label>Telefone<input id="pPhone"></label>
-      <label class="wide">LinkedIn<input id="pLinkedin"></label>
-      <label class="wide">PortfÃ³lio<input id="pPortfolio"></label>
-      <label>CPF (opcional)<input id="pCpf"></label>
-      <label>Data de nascimento (opcional)<input id="pBirthDate" placeholder="DD/MM/AAAA"></label>
-      <label>CEP (opcional)<input id="pCep"></label>
-      <label class="wide">EndereÃ§o (opcional)<input id="pAddress"></label>
-      <label>Bairro (opcional)<input id="pNeighborhood"></label>
-      <label class="wide">InformaÃ§Ãµes adicionais confirmadas<textarea id="pAdditionalFacts" rows="4" placeholder="Ex.: inÃ­cio imediato, disponibilidade para viagens, experiÃªncia pessoal especÃ­fica..."></textarea></label>
-    </div>
-    <div class="actions">
-      <button id="saveProfile" type="button" class="secondary">Salvar correÃ§Ãµes</button>
-    </div>
-  </section>
+  <main class="content">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">LetsWork</div>
+        <h1 id="pageTitle">Novo candidato</h1>
+        <p id="pageSubtitle">Importe um currículo para começar.</p>
+      </div>
+      <div id="candidateActions" class="top-actions hidden">
+        <button id="deleteCandidate" class="ghost danger-text" type="button">Excluir candidato</button>
+      </div>
+    </header>
+    <section id="newCandidateView" class="welcome-card">
+      <div class="welcome-copy">
+        <span class="kicker">Começar</span>
+        <h2>Adicione um currículo</h2>
+        <p>O LetsWork lê o arquivo, monta o perfil do candidato e mantém todo o histórico salvo localmente.</p>
+      </div>
+      <form id="uploadForm" class="upload-box">
+        <input id="resumeFile" name="files" type="file" multiple required>
+        <label for="resumeFile" class="drop-area">
+          <div class="upload-icon">↑</div>
+          <strong>Escolher arquivos</strong>
+          <span>Currículo + portfólio, certificados ou outros documentos</span>
+          <div id="fileSelection" class="file-selection"></div>
+          <label id="primaryFileWrap" class="primary-file hidden">Currículo principal<select id="primaryFileSelect"></select></label>
+        </label>
+        <button type="submit" class="primary">Importar arquivos</button>
+      </form>
+      <div id="uploadStatus" class="notice hidden"></div>
+    </section>
 
-  <section id="filtersCard" class="card hidden">
-    <h2>3. Filtros da busca</h2>
-    <div class="checks">
-      <label><input id="nationwide" type="checkbox"> Buscar em todo o Brasil</label>
-    </div>
-    <div class="grid" id="locationFields">
-      <label>Estado(s)<input id="state" value="RJ" placeholder="RJ, SP"></label>
-      <label>Cidade(s)<input id="city" value="Rio de Janeiro" placeholder="Rio de Janeiro, NiterÃ³i"></label>
-      <label>Ãrea desejada (opcional)<input id="area" placeholder="Ex.: Professora, UX/UI, Financeiro"></label>
-    </div>    <div class="grid" style="margin-top:14px">
-      <label>Modelo de trabalho
-        <select id="workMode">
-          <option value="include_remote">Presencial + remoto</option>
-          <option value="remote_only">Somente home office</option>
-          <option value="onsite_only">Somente presencial</option>
-        </select>
-      </label>
-      <label>PCD
-        <select id="pcdMode">
-          <option value="exclude">NÃ£o buscar PCD</option>
-          <option value="include">PCD tambÃ©m</option>
-          <option value="only">Somente PCD</option>
-        </select>
-      </label>
-      <label>MÃ¡ximo de vagas<input id="limit" type="number" min="100" max="500" value="500"></label>
-    </div>
-    <div class="checks">
-      <label><input id="clt" type="checkbox" checked> CLT</label>
-      <label><input id="pj" type="checkbox"> PJ</label>
-      <label><input id="availability" type="checkbox"> Disponibilidade confirmada</label>
-    </div>
-    <div class="grid two" style="margin-top:14px">
-      <label>PretensÃ£o salarial padrÃ£o<input id="salaryExpectation" value="A combinar"></label>
-      <label>ExecuÃ§Ã£o
-        <select id="submitMode"><option value="dry">SimulaÃ§Ã£o</option><option value="live">Modo real</option></select>
-      </label>
-    </div>    <div class="actions"><button id="searchBtn" type="button">Buscar vagas compatÃ­veis</button></div>
-    <div id="searchStatus" class="status hidden"></div>
-  </section>
+    <section id="candidateView" class="hidden">
+      <nav class="tabs" aria-label="Seções do candidato">
+        <button class="tab active" data-tab="search" type="button">Busca</button>
+        <button class="tab" data-tab="profile" type="button">Perfil</button>
+        <button class="tab" data-tab="reports" type="button">Relatórios</button>
+      </nav>
 
-  <section id="resultsCard" class="card hidden">
-    <div class="topline">
-      <div><h2>4. Vagas compatÃ­veis</h2><div id="resultMeta" class="muted"></div></div>
-    </div>
-    <div class="actions">
-      <button id="applyBtn" type="button">Preparar e processar todas</button>
-      <button id="retryBtn" type="button" class="secondary">Refazer erros</button>
-      <a id="xlsxBtn" class="button secondary" href="#">Exportar Excel</a>
-      <a id="csvBtn" class="button secondary" href="#">Exportar CSV</a>
-    </div>
-    <div id="applyStatus" class="status hidden"></div>
-    <div class="table-wrap" style="margin-top:14px">
-      <table>
-        <thead><tr><th>Vaga</th><th>Local</th><th>RemuneraÃ§Ã£o</th><th>Fonte</th><th>Compat.</th><th>Status</th><th>Link</th></tr></thead>
-        <tbody id="jobsBody"></tbody>
-      </table>
-    </div>
-  </section>
-</main>
+      <div id="tab-search" class="tab-panel">
+        <div class="stats-grid">
+          <div class="stat"><span>Candidaturas enviadas</span><strong id="statSent">0</strong></div>
+          <div class="stat"><span>Buscas realizadas</span><strong id="statRuns">0</strong></div>
+          <div class="stat"><span>Vagas nesta busca</span><strong id="statJobs">0</strong></div>
+          <div class="stat"><span>Status</span><strong id="statStatus" class="stat-text">Pronto</strong></div>
+        </div>
+        <section class="panel">
+          <div class="panel-head">
+            <div><span class="kicker">Filtros</span><h2>Onde buscar</h2></div>
+            <span class="hint">Coleta ampla; seleciona até 500 melhores vagas enviáveis</span>
+          </div>
+          <div class="toggle-line">
+            <label class="switch-row"><input id="nationwide" type="checkbox"><span>Buscar em todo o Brasil</span></label>
+          </div>
+          <div class="form-grid three" id="locationFields">
+            <label>Estado(s)<input id="state" value="RJ" placeholder="RJ, SP"></label>
+            <label>Cidade(s)<input id="city" value="Rio de Janeiro" placeholder="Rio de Janeiro, Niterói"></label>
+            <label>Abrangência local<select id="locationScope"><option value="state_priority" selected>Priorizar cidade, aceitar o estado</option><option value="city_only">Somente a cidade</option><option value="state_only">Estado inteiro</option></select></label>
+            <label>Área desejada <span>opcional</span><input id="area" placeholder="Ex.: UX/UI, Professora, Financeiro"></label>
+          </div>
+          <div class="form-grid three">
+            <label>Modelo de trabalho
+              <select id="workMode"><option value="include_remote">Presencial + remoto</option><option value="remote_only">Somente home office</option><option value="onsite_only">Somente presencial</option></select>
+            </label>
+            <label>PCD
+              <select id="pcdMode"><option value="exclude">Não buscar vagas exclusivas PCD</option><option value="include">Incluir vagas PCD</option><option value="only">Somente vagas PCD</option></select>
+            </label>
+                        <label>N&iacute;vel de experi&ecirc;ncia
+              <select id="experienceLevel"><option value="entry" selected>Sem ou pouca experi&ecirc;ncia</option><option value="none">Somente sem experi&ecirc;ncia / est&aacute;gio</option><option value="all">Todos os n&iacute;veis</option></select>
+            </label>
+            <label>Vagas publicadas nos &uacute;ltimos dias<input id="recencyDays" type="number" min="1" max="60" value="15"></label>
+<label>Máximo de vagas<input id="limit" type="number" min="100" max="500" value="500"></label>
+          </div>
+          <div class="chip-group">
+            <label><input id="clt" type="checkbox" checked><span>CLT</span></label>
+            <label><input id="pj" type="checkbox" checked><span>PJ</span></label>
+            <label><input id="internship" type="checkbox" checked><span>Estágio</span></label>
+            <label><input id="temporary" type="checkbox" checked><span>Temporário</span></label>
+            <label><input id="apprentice" type="checkbox" checked><span>Aprendiz</span></label>
+            <label><input id="freelance" type="checkbox" checked><span>Freelancer</span></label>
+          </div>
+          <div class="form-grid two compact-grid">
+            <label>Pretensão salarial padrão<input id="salaryExpectation" value="A combinar"></label>
+            <label>Execução
+              <select id="submitMode"><option value="dry">Simulação</option><option value="live">Modo real</option></select>
+            </label>
+          </div>
+          <div class="toggle-line split">
+            <label class="switch-row"><input id="availability" type="checkbox"><span>Disponibilidade confirmada</span></label>
+            <label class="switch-row"><input id="salaryFromJob" type="checkbox" checked><span>Usar salário anunciado como pretensão</span></label>
+          </div>
+          <div class="panel-actions">
+            <button id="searchBtn" class="primary" type="button">Buscar vagas compatíveis</button>
+            <div id="searchStatus" class="inline-status"></div>
+          </div>
+        </section>
+
+        <section id="resultsCard" class="panel hidden">
+          <div class="panel-head results-head">
+            <div><span class="kicker">Resultado</span><h2>Vagas compatíveis</h2><p id="resultMeta" class="hint"></p></div>
+            <div class="action-row">
+              <select id="batchSelect" class="batch-select hidden" aria-label="Lote de vagas"></select>
+              <button id="applyBtn" class="primary" type="button">Processar este lote</button>
+              <button id="retryBtn" class="ghost" type="button">Refazer erros</button>
+              <a id="xlsxBtn" class="ghost button-link" href="#">Excel</a>
+              <a id="csvBtn" class="ghost button-link" href="#">CSV</a>
+            </div>
+          </div>
+          <div id="applyStatus" class="notice hidden"></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Vaga</th><th>Local</th><th>Remuneração</th><th>Compat.</th><th>Status</th><th></th></tr></thead>
+              <tbody id="jobsBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+      <div id="tab-profile" class="tab-panel hidden">
+        <section class="panel">
+          <div class="panel-head">
+            <div><span class="kicker">Arquivos</span><h2>Documentos do candidato</h2><p class="hint">Currículo, portfólio e anexos usados pelo LetsWork.</p></div>
+          </div>
+          <div id="documentsList" class="documents-list"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <div><span class="kicker">Perfil</span><h2>Dados do candidato</h2></div>
+            <button id="saveProfile" class="primary" type="button">Salvar alterações</button>
+          </div>
+          <div class="form-grid two">
+            <label>Nome<input id="pName"></label>
+            <label>E-mail<input id="pEmail" type="email"></label>
+            <label>Telefone<input id="pPhone"></label>
+            <label>LinkedIn<input id="pLinkedin"></label>
+            <label>Portfólio<input id="pPortfolio"></label>
+            <label>Instagram <span>opcional</span><input id="pInstagram"></label>
+            <label>PCD
+              <select id="pPcd"><option value="">Não informado</option><option value="no">Não</option><option value="yes">Sim</option></select>
+            </label>
+            <label>CPF <span>opcional</span><input id="pCpf"></label>
+            <label>Data de nascimento <span>opcional</span><input id="pBirthDate" placeholder="DD/MM/AAAA"></label>
+            <label>CEP <span>opcional</span><input id="pCep"></label>
+            <label>Bairro <span>opcional</span><input id="pNeighborhood"></label>
+            <label class="span-2">Endereço <span>opcional</span><input id="pAddress"></label>
+            <label class="span-2">Informações adicionais confirmadas
+              <textarea id="pAdditionalFacts" rows="5" placeholder="Disponibilidade, experiências pessoais, preferências confirmadas..."></textarea>
+            </label>
+          </div>
+          <div id="profileStatus" class="notice hidden"></div>
+        </section>
+      </div>
+
+      <div id="tab-reports" class="tab-panel hidden">
+        <section class="panel">
+          <div class="panel-head">
+            <div><span class="kicker">Histórico</span><h2>Relatórios do candidato</h2><p class="hint">Baixe novamente qualquer planilha salva antes de excluir o cadastro.</p></div>
+            <a id="latestReportBtn" class="primary button-link" href="#">Gerar planilha atual</a>
+          </div>
+          <div id="reportsList" class="reports-list"></div>
+        </section>
+      </div>
+    </section>
+
+    <div id="sessionStatus" class="toast hidden"></div>
+  </main>
+</div>
 <script type="module" src="/app.js"></script>
 </body>
 </html>

@@ -1,25 +1,81 @@
-﻿{
-    "name":  "letswork",
-    "version":  "0.1.0",
-    "description":  "LetsWork - automaÃ§Ã£o local de busca, adaptaÃ§Ã£o e candidatura a vagas",
-    "type":  "module",
-    "main":  "src/server.mjs",
-    "scripts":  {
-                    "start":  "node src/server.mjs",
-                    "dev":  "node --watch src/server.mjs",
-                    "check":  "node --check src/server.mjs"
-                },
-    "dependencies":  {
-                         "@napi-rs/canvas":  "^1.0.9",
-                         "adm-zip":  "^0.6.1",
-                         "dotenv":  "^17.4.2",
-                         "exceljs":  "^4.4.0",
-                         "express":  "^5.2.1",
-                         "mammoth":  "^1.12.3",
-                         "multer":  "^2.4.0",
-                         "pdf-lib":  "^1.17.1",
-                         "pdfjs-dist":  "^6.3.289",
-                         "playwright-core":  "^1.63.0",
-                         "tesseract.js":  "^7.0.0"
-                     }
+{
+  "name": "letswork",
+  "version": "0.1.0",
+  "description": "LetsWork - busca, adaptação e automação local de candidaturas",
+  "type": "module",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "check": "node --check src/server.mjs && node --check src/apply/engine.mjs && node --check src/services/jobs.mjs && node --check src/services/ranking.mjs && node --check src/services/tailor.mjs && node --check src/sources/linkedin.mjs && node --check src/sources/vagascom.mjs && node --check src/sources/gupy.mjs && node --check public/app.js && node --check desktop/main.cjs",
+    "server": "node src/server.mjs",
+    "dist": "electron-builder --win nsis portable"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.9",
+    "adm-zip": "^0.6.1",
+    "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "mammoth": "^1.12.3",
+    "multer": "^2.4.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.3.289",
+    "playwright-core": "^1.63.0",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "electron": "^44.4.1",
+    "electron-builder": "^26.15.3",
+    "png-to-ico": "^3.0.2"
+  },
+  "productName": "LetsWork",
+  "build": {
+    "appId": "com.letswork.desktop",
+    "productName": "LetsWork",
+    "asar": true,
+    "files": [
+      "desktop/**/*",
+      "public/**/*",
+      "src/**/*",
+      "scripts/**/*",
+      "package.json",
+      ".env.example"
+    ],
+    "extraMetadata": {
+      "main": "desktop/main.cjs"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "LetsWork"
+    },
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "asarUnpack": [
+      "scripts/**/*"
+    ]
+  },
+  "author": "LetsWork"
 }
