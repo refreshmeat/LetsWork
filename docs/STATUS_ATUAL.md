@@ -36,9 +36,12 @@ Data: 18/09/2026
 - Layout: sem overflow horizontal.
 - IA: somente sessão persistente do ChatGPT web no perfil dedicado, GPT-5.6 Sol High, controlada por CDP local em `127.0.0.1:9223`. Cada candidato mantém uma única conversa persistente salva em `dados\\chatgpt-conversations.json`. O Chromium dedicado é deslocado para fora da tela, retirado da barra de tarefas e mantido ativo via CDP, portanto só a janela do LetsWork fica visível.
 - Validação E2E de 18/09/2026: candidato fictício gerou 39 termos de busca; o mesmo chat persistente personalizou o currículo; PDF de 1 página foi gerado localmente; Playwright anexou o arquivo a um formulário local e o upload recebido teve tamanho idêntico (`UPLOAD_MATCH=true`); nenhuma vaga real foi enviada.
-- Pipeline de candidatura: até 6 páginas de vaga são coletadas em paralelo; o Sol personaliza um currículo por vez na conversa persistente; assim que cada PDF fica pronto ele entra numa fila consumida por 2 workers de candidatura, portanto uma vaga lenta não bloqueia a geração das próximas.
+- Pipeline de candidatura: pré-flight com Playwright abre até 12 páginas em paralelo e verifica a candidatura real antes de gastar IA. Vagas antes marcadas como `UNVERIFIED_LOGIN` entram como acesso a verificar; login comprovado é cortado antes da geração de currículo.
+- Personalização em lote: o Sol processa até 50 vagas por chamada e devolve somente seleção factual de projetos/skills; o texto final é montado localmente a partir do currículo verificado. Se a IA em lote falhar, existe fallback factual local em vez de dezenas de chamadas individuais.
+- Envio: um único Chromium de aplicação é compartilhado por até 10 workers, cada um em contexto isolado. Uma vaga lenta não bloqueia as demais.
+- Formulários: perguntas obrigatórias de uma etapa são consolidadas em uma única chamada ao Sol. Bairro e outros fatos explícitos são resolvidos localmente; deslocamento pode receber uma estimativa conservadora quando origem e destino são conhecidos.
 - PDFs personalizados são salvos permanentemente em `dados\\candidatos\\<id>\\curriculos_personalizados`, não em `temp\\runtime_*`.
-- Benchmark isolado de 18/09/2026 após a mudança de pipeline: 4 vagas fictícias, 4 PDFs permanentes e 4 envios locais concluídos em 59,461 s, sem erros. A captura de resposta passou a usar `conversation-turn-N`, evitando falso travamento quando o ChatGPT recicla nós do DOM.
+- Benchmark isolado de 18/09/2026: 50 vagas fictícias passaram pelo pipeline completo em 56,471 s, com 50 PDFs gerados e 50/50 `SENT`. Os 50 PDFs ficaram prontos em cerca de 32 s. Teste genérico adicional confirmou `SENT` com arquivo anexado e preenchimento em lote de bairro, deslocamento, residência por região e disponibilidade.
 - Authenticode do executável: deve ser Valid após cada build.
 
 ## Regras de ouro

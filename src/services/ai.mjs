@@ -224,13 +224,17 @@ async function runPrompt(system,prompt,{candidateId=null,clearRateModal=false}={
 }
 async function runWithBackoff(system,prompt,options){
   let backoff=RATE_BACKOFF_MS;
-  for(let attempt=0;attempt<3;attempt++){
+  for(let attempt=0;attempt<4;attempt++){
     try{return await runPrompt(system,prompt,{...options,clearRateModal:attempt>0});}
     catch(e){
-      if(e?.code!=='CHATGPT_RATE_LIMITED')throw e;
-      if(attempt===2)throw new Error('ChatGPT temporariamente limitado por excesso de solicitações');
-      await sleep(backoff);
-      backoff=Math.min(backoff*2,240000);
+      const message=String(e?.message||e);
+      if(e?.code==='CHATGPT_RATE_LIMITED'){
+        if(attempt===3)throw new Error('ChatGPT temporariamente limitado por excesso de solicitações');
+        await sleep(backoff);backoff=Math.min(backoff*2,240000);continue;
+      }
+      const transient=/Timeout CDP|Falha ao conectar ao CDP|Sess[aã]o CDP encerrada|ChatGPT n[aã]o ficou pronto|Aba persistente do ChatGPT n[aã]o encontrada/i.test(message);
+      if(!transient||attempt>=2)throw e;
+      await sleep(700*(attempt+1));
     }
   }
 }

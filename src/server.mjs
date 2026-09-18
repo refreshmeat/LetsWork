@@ -11,8 +11,8 @@ import { extractText, inferProfile, extractPreferredResumeFromZip } from './serv
 import { searchJobs, buildSearchTerms } from './services/jobs.mjs';
 import { rankJobs } from './services/ranking.mjs';
 import { classifyJobsForQueue } from './services/sendability.mjs';
-import { tailorResume } from './services/tailor.mjs';
-import { applyToJob, closeLoginSession, createJobContextCollector } from './apply/engine.mjs';
+import { tailorResume, tailorResumesBatch } from './services/tailor.mjs';
+import { applyToJob, closeLoginSession, createJobContextCollector, createApplicationBrowser } from './apply/engine.mjs';
 import { runtime } from './runtime.mjs';
 import { storage, ensureCandidateDirs, candidateDir } from './storage.mjs';
 import { registerMultiFileRoute } from './multifile.mjs';
@@ -204,9 +204,10 @@ app.post('/api/search', async (req,res) => {
     const unseen=candidatePool.filter(j=>!seen.has(jobFingerprint(j)));
     const ranked = rankJobs(unseen,profile,effectiveFilters);
     const batchSize=Math.min(500,Math.max(100,Number(effectiveFilters.limit||500)));
-    const prepared=await classifyJobsForQueue(ranked,{batchSize,probeLimit:1800});
+    const prepared=await classifyJobsForQueue(ranked,{batchSize,probeLimit:Math.min(160,batchSize)});
+    for(const j of prepared)if(j.reason==='UNVERIFIED_LOGIN'){j.sendable=1;j.reason='ACCESS_TO_VERIFY';j.verified=false;}
     const poolClassified=db.prepare("UPDATE candidate_job_pool SET score=?,sendable=?,blocked_reason=?,last_seen_at=CURRENT_TIMESTAMP WHERE candidate_id=? AND fingerprint=?");
-    for(const j of prepared) poolClassified.run(j.score||0,j.sendable?1:0,j.reason||'',resume.candidate_id,jobFingerprint(j));
+    for(const j of prepared) poolClassified.run(j.score||0,j.reason==='ACCESS_TO_VERIFY'?0:(j.sendable?1:0),j.reason||'',resume.candidate_id,jobFingerprint(j));
     prepared.forEach((j,index)=>{j._rank=index+1;});
     let sendableIndex=0;
     for(const j of prepared) if(j.sendable){sendableIndex++;j._batch=Math.floor((sendableIndex-1)/batchSize)+1;j._selected=j._batch===1?1:0;} else {j._batch=0;j._selected=0;}
@@ -252,7 +253,7 @@ async function processRun(runId,onlyErrors=false) {
   }
   db.prepare('UPDATE runs SET status=? WHERE id=?').run(onlyErrors?'RETRYING':'APPLYING',runId);
 
-  const collector=createJobContextCollector(jobs,{concurrency:6});
+  const collector=createJobContextCollector(jobs,{concurrency:Math.max(4,Math.min(20,Number(process.env.PREFLIGHT_WORKERS||12)))});
   collector.done.catch(()=>{});
   const ready=[];
   const waiters=[];
@@ -283,34 +284,50 @@ async function processRun(runId,onlyErrors=false) {
   };
 
   async function producer(){
+    const BATCH_SIZE=Math.max(2,Math.min(50,Number(process.env.AI_JOB_BATCH_SIZE||50)));
+    let cursor=0;
     try{
-      for(const job of jobs){
-        const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
-        if(['SENT','ALREADY_APPLIED'].includes(old?.status)) continue;
-        if(old?.tailored_file && fs.existsSync(old.tailored_file)){
-          push({job,file:old.tailored_file});
-          continue;
+      while(cursor<jobs.length){
+        const batch=[];
+        while(cursor<jobs.length&&batch.length<BATCH_SIZE){
+          const job=jobs[cursor++];
+          const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
+          if(['SENT','ALREADY_APPLIED'].includes(old?.status))continue;
+          if(old?.tailored_file&&fs.existsSync(old.tailored_file)){push({job,file:old.tailored_file});continue;}
+          saveApplication(job,'PREPARING','','');batch.push(job);
         }
-        saveApplication(job,'PREPARING','','');
+        if(!batch.length)continue;
+        const contexts=await Promise.all(batch.map(async job=>({job,ctx:await collector.get(job.id)})));
+        const enriched=[];
+        for(const {job,ctx} of contexts){
+          if(ctx?.blocked){
+            const status=/login necess[aá]rio/i.test(ctx.blocked)?'SKIPPED_LOGIN':'NEEDS_DATA';
+            saveApplication(job,status,'',ctx.blocked);
+            if(status==='SKIPPED_LOGIN')db.prepare("UPDATE jobs SET sendable=0,blocked_reason='LOGIN_REQUIRED',selected=0,batch_no=0 WHERE id=?").run(job.id);
+            updateHistory(job,status);continue;
+          }
+          enriched.push({...job,url:ctx?.url||job.url,description:[job.description||'',ctx?.text||''].filter(Boolean).join('\n\n').slice(0,50000)});
+        }
+        if(!enriched.length)continue;
         try{
-          const ctx=await collector.get(job.id);
-          const enrichedJob={...job,description:[job.description||'',ctx?.text||''].filter(Boolean).join('\n\n').slice(0,50000)};
-          const tailored=await tailorResume(resume.stored_path,enrichedJob,profile);
-          saveApplication(job,'READY',tailored.file,'');
-          push({job:enrichedJob,file:tailored.file});
-        }catch(e){
-          const message=String(e?.message||e).slice(0,500);
-          saveApplication(job,'ERROR','',message);
-          updateHistory(job,'ERROR');
+          const generated=await tailorResumesBatch(resume.stored_path,enriched,profile);
+          const byId=new Map(generated.map(x=>[String(x.jobId),x]));
+          for(const job of enriched){
+            const tailored=byId.get(String(job.id));
+            if(!tailored?.file)throw new Error('Lote de currículos retornou item incompleto');
+            saveApplication(job,'READY',tailored.file,'');push({job,file:tailored.file});
+          }
+        }catch(batchError){
+          for(const job of enriched){
+            try{const tailored=await tailorResume(resume.stored_path,job,profile);saveApplication(job,'READY',tailored.file,'');push({job,file:tailored.file});}
+            catch(e){const message=String(e?.message||batchError?.message||e).slice(0,500);saveApplication(job,'ERROR','',message);updateHistory(job,'ERROR');}
+          }
         }
       }
-    }finally{
-      producerDone=true;
-      wake();
-      await collector.done.catch(()=>{});
-    }
+    }finally{producerDone=true;wake();await collector.done.catch(()=>{});}
   }
 
+  let applicationBrowser=null;
   async function applyWorker(){
     while(true){
       const item=await pop();
@@ -319,7 +336,7 @@ async function processRun(runId,onlyErrors=false) {
       const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
       if(['SENT','ALREADY_APPLIED'].includes(old?.status)) continue;
       try{
-        const result=await applyToJob(job,file,profile,prefs,{dryRun});
+        const result=await applyToJob(job,file,profile,prefs,{dryRun,browser:applicationBrowser});
         saveApplication(job,result.status,file,result.error||'');
         if(result.status==='SKIPPED_LOGIN') db.prepare("UPDATE jobs SET sendable=0,blocked_reason='LOGIN_REQUIRED',selected=0,batch_no=0 WHERE id=?").run(job.id);
         updateHistory(job,result.status);
@@ -331,8 +348,14 @@ async function processRun(runId,onlyErrors=false) {
     }
   }
 
-  const workers=Array.from({length:dryRun?3:2},()=>applyWorker());
-  await Promise.all([producer(),...workers]);
+  const workerCount=Math.max(2,Math.min(14,Number(process.env.APPLY_WORKERS||(dryRun?12:10))));
+  applicationBrowser=await createApplicationBrowser();
+  try{
+    const workers=Array.from({length:workerCount},()=>applyWorker());
+    await Promise.all([producer(),...workers]);
+  }finally{
+    if(applicationBrowser)await applicationBrowser.close().catch(()=>{});
+  }
   if(!dryRun) await closeLoginSession();
   db.prepare('UPDATE runs SET status=? WHERE id=?').run('DONE',runId);
 }
