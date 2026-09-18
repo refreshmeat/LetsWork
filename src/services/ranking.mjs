@@ -126,16 +126,42 @@ function inferDomains(text){
   if(/recursos humanos|\brh\b|recrutamento|departamento pessoal/.test(t)) out.push('hr');
   return [...new Set(out)];
 }
+const specializationRules=[
+  {job:/\b(?:engenharia|engenheiro|engenheira|engineer|engineering|mec[aâ]nica|mec[aâ]nico|el[eé]trica|el[eé]trico|edifica[cç][oõ]es|impermeabiliza[cç][aã]o)\b/,profile:/\b(?:engenharia|engenheiro|engenheira|engineer|engineering|mec[aâ]nica|mec[aâ]nico|el[eé]trica|el[eé]trico|edifica[cç][oõ]es)\b/},
+  {job:/\b(?:enfermagem|enfermeir[oa]|fisioterapia|fisioterapeuta|psicologia|psic[oó]log[oa]|biomedicina|biom[eé]dic[oa]|farm[aá]cia|farmac[eê]utic[oa]|nutri[cç][aã]o|nutricionista)\b/,profile:/\b(?:enfermagem|enfermeir[oa]|fisioterapia|fisioterapeuta|psicologia|psic[oó]log[oa]|biomedicina|biom[eé]dic[oa]|farm[aá]cia|farmac[eê]utic[oa]|nutri[cç][aã]o|nutricionista)\b/},
+  {job:/\b(?:auxiliar\s+de\s+coleta|t[eé]cnic[oa].{0,18}laborat[oó]rio|laboratorista)\b/,profile:/\b(?:coleta|laborat[oó]rio|laboratorista|biomedicina|enfermagem)\b/},
+  {job:/\b(?:pedagogia|pedag[oó]gic[oa]|professor[ao]?|docente|media[cç][aã]o\s+escolar|educa[cç][aã]o\s+infantil|educa[cç][aã]o\s+f[ií]sica|matem[aá]tica|letras)\b/,profile:/\b(?:pedagogia|pedag[oó]gic[oa]|professor[ao]?|docente|licenciatura|educa[cç][aã]o\s+f[ií]sica|matem[aá]tica|letras)\b/},
+  {job:/\b(?:gastronomia|cozinha|confeitaria|cozinheir[oa]|gar[cç]om)\b/,profile:/\b(?:gastronomia|cozinha|confeitaria|cozinheir[oa]|gar[cç]om)\b/},
+  {job:/\b(?:jur[ií]dic[oa]|advogad[oa]|direito)\b/,profile:/\b(?:jur[ií]dic[oa]|advogad[oa]|direito)\b/},
+  {job:/\b(?:contabilidade|cont[aá]bil|contador[ao]?|fiscal)\b/,profile:/\b(?:contabilidade|cont[aá]bil|contador[ao]?|fiscal)\b/},
+  {job:/\b(?:qsms|pcm|pcp)\b/,profile:/\b(?:qsms|pcm|pcp|manuten[cç][aã]o|produ[cç][aã]o\s+industrial|engenharia)\b/}
+];
+function professionalJobText(job){
+  let text=norm(`${job.title||''} ${job.description||''}`);
+  for(const value of [job.company,job.location]){
+    const token=norm(value||'').trim();
+    if(token.length>=3)text=text.split(token).join(' ');
+  }
+  return text.replace(/\s+/g,' ').trim();
+}
+function specializationMismatch(job,profileText){
+  const title=norm(job.title||'');
+  const profile=norm(profileText||'');
+  if(/\b(?:arquitetura|urbanismo|arquiteto|arquiteta)\b/.test(title)&&!/\b(?:arquitetura|urbanismo|arquiteto|arquiteta|design\s+de\s+interiores)\b/.test(profile)) return true;
+  return specializationRules.some(rule=>rule.job.test(title)&&!rule.profile.test(profile));
+}
+
 function targetRelevance(job,profile,filters){
   const title=norm(job.title||'');
   const profileText=norm(`${profile.rawText||''} ${(profile.skills||[]).join(' ')}`);
   const exclusions=Array.isArray(filters.searchExclusions)?filters.searchExclusions.map(norm).filter(Boolean):[];
   if(exclusions.some(x=>title.includes(x))) return {ok:false,boost:0};
+  if(specializationMismatch(job,profileText)) return {ok:false,boost:0};
   if(/rio design|design barra|design shopping/.test(title)&&/vendedor|vendedora|caixa|operador|loja/.test(title)) return {ok:false,boost:0};
   if(/designer.{0,20}(sobrancelh|cilio|unha|estetic)/.test(title)&&!/sobrancelh|cilio|unha|estetic|beleza/.test(profileText)) return {ok:false,boost:0};
   const titleTermHits=Number(job.searchTitleHits||0),bodyTermHits=Number(job.searchBodyHits||0);
   const profileWords=words(`${profile.rawText||''} ${(profile.skills||[]).join(' ')}`);
-  const titleWords=words(job.title||''),bodyWords=words(`${job.title||''} ${job.description||''} ${job.company||''}`);
+  const titleWords=words(job.title||''),bodyWords=words(professionalJobText(job));
   const roleHead=String(job.title||'').split(/\s+[-–—]\s+/)[0]||String(job.title||'');
   const roleWords=words(roleHead);
   const titleProfile=[...titleWords].filter(x=>profileWords.has(x)).length;
@@ -168,14 +194,15 @@ function areaCompatibility(job,areaText){
   const minScore=Number(filters.minScore??0.13);
   const eligible=jobs.map(job=>{
     const flags=inferFlags(job);
-    const jw=words(`${job.title} ${job.description} ${job.company}`);
+    const jw=words(professionalJobText(job));
     const overlap=[...jw].filter(x=>pWords.has(x)).length;
     const base=overlap/Math.max(7,Math.min(jw.size,pWords.size||7));
     const area=areaCompatibility(job,filters.area||'');
     const target=targetRelevance(job,profile,filters);
     const locBoost=locationBoost(job,filters,flags);
-    return {...job,...flags,areaMatch:area.ok,targetMatch:target.ok,score:Math.min(1,base+area.boost+target.boost+locBoost)};
-  }).filter(job=>job.areaMatch&&job.targetMatch)
+    const professionalScore=Math.min(1,base+area.boost+target.boost);
+    return {...job,...flags,areaMatch:area.ok,targetMatch:target.ok,professionalScore,score:Math.min(1,professionalScore+locBoost)};
+  }).filter(job=>job.areaMatch&&job.targetMatch&&job.professionalScore>=minScore)
     .filter(job=>pcdOk(job,filters.pcdMode||'exclude'))
     .filter(job=>workModeOk(job,filters.workMode||'include_remote'))
     .filter(job=>locationOk(job,filters,job))
