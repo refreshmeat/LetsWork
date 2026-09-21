@@ -21,7 +21,7 @@ $SWP_NOACTIVATE = 0x0010
 $SWP_FRAMECHANGED = 0x0020
 for($i=0;$i -lt 8;$i++){
   $rows = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like '*remote-debugging-port=9223*' -and $_.CommandLine -like ('*' + $ProfilePath + '*') }
+    Where-Object { $_.CommandLine -like '*remote-debugging-port=9333*' -and $_.CommandLine -like ('*' + $ProfilePath + '*') }
   foreach($row in $rows){
     try{
       $p = Get-Process -Id $row.ProcessId -ErrorAction Stop
@@ -31,7 +31,7 @@ for($i=0;$i -lt 8;$i++){
         $style = ($style -bor $WS_EX_TOOLWINDOW) -band (-bnot $WS_EX_APPWINDOW)
         [LetsWorkWin32]::SetWindowLongPtr($h,$GWL_EXSTYLE,[IntPtr]$style) | Out-Null
         [LetsWorkWin32]::SetWindowPos($h,[IntPtr]::Zero,-32000,-32000,800,600,($SWP_NOZORDER -bor $SWP_NOACTIVATE -bor $SWP_FRAMECHANGED)) | Out-Null
-        [LetsWorkWin32]::ShowWindowAsync($h,4) | Out-Null
+        [LetsWorkWin32]::ShowWindowAsync($h,0) | Out-Null
       }
     }catch{}
   }

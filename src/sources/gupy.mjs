@@ -30,8 +30,8 @@ async function blockNoise(page) {
   });
 }export async function searchGupy(terms, filters, max=150) {
   const browser=await chromium.launch({executablePath:CHROME,headless:true,args:['--no-sandbox']});
-  const out=[],seen=new Set(),queue=terms.slice(0,32); let cursor=0;
-  const deadline=Date.now()+55000;
+  const out=[],seen=new Set(),queue=[...new Set(terms)].slice(0,60); let cursor=0;
+  const deadline=Date.now()+70000;
   async function worker(){
     const page=await browser.newPage();await blockNoise(page);
     try{
@@ -40,17 +40,22 @@ async function blockNoise(page) {
         const state=!filters.nationwide&&filters.state?`&state=${encodeURIComponent(stateValue(filters.state))}`:'';
         const url=`https://portal.gupy.io/job-search/term=${encodeURIComponent(term)}${state}`;
         try{await page.goto(url,{waitUntil:'domcontentloaded',timeout:12000});}catch{continue;}
-        await page.waitForTimeout(350);
-        for(let n=1;n<=6&&out.length<max&&Date.now()<deadline;n++){
+        await page.waitForTimeout(300);
+        let n=1,lastNew=-1;
+        while(out.length<max&&Date.now()<deadline&&n<=30){
           const cards=await page.locator('a[href*=".gupy.io/job/"]').evaluateAll(as=>as.map(a=>({text:(a.innerText||'').trim(),url:a.href})));
-          for(const card of cards){if(seen.has(card.url))continue;const parsed=parseCard(card.text,card.url);if(parsed?.title){seen.add(card.url);out.push(parsed);if(out.length>=max)break;}}
+          let added=0;
+          for(const card of cards){if(seen.has(card.url))continue;const parsed=parseCard(card.text,card.url);if(parsed?.title){seen.add(card.url);out.push(parsed);added++;if(out.length>=max)break;}}
+          if(!cards.length||(added===0&&lastNew===0))break;
+          lastNew=added;
           const next=page.getByRole('button',{name:`Página ${n+1}`}).first();
           if(!await next.count())break;
-          await next.click({timeout:2000}).catch(()=>{});await page.waitForTimeout(200);
+          const disabled=await next.isDisabled().catch(()=>false);if(disabled)break;
+          await next.click({timeout:2500}).catch(()=>{});await page.waitForTimeout(180);n++;
         }
       }
     }finally{await page.close().catch(()=>{});}
   }
-  try{await Promise.all(Array.from({length:Math.min(2,queue.length)},()=>worker()));return uniq(out).slice(0,max);}
+  try{await Promise.all(Array.from({length:Math.min(4,queue.length||1)},()=>worker()));return uniq(out).slice(0,max);}
   finally{await browser.close().catch(()=>{});}
 }

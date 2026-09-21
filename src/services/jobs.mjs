@@ -9,6 +9,8 @@ import { searchAdzuna } from '../sources/adzuna.mjs';
 import { searchLinkVagas } from '../sources/linkvagas.mjs';
 import { searchLinkedIn } from '../sources/linkedin.mjs';
 import { searchTramper, searchHuanna, searchEmpregoDaqui, searchBeaVagas } from '../sources/directsites.mjs';
+import { searchWebJobs } from '../sources/webjobs.mjs';
+import { searchInfoJobs, searchTrabalhaBrasil } from '../sources/jobboards.mjs';
 import { askAI, parseJsonLoose } from './ai.mjs';
 
 const CHROME = process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
@@ -64,13 +66,21 @@ function genericProfileTerms(profile){
   return [...new Set([...roles,...found])].slice(0,6);
 }
 function compactProfessionalText(profile){
-  const primary=String(profile.rawText||'').split(/\n=== DOCUMENTO DE APOIO:/i)[0];
-  const lines=primary.split(/\r?\n/).map(x=>x.trim()).filter(Boolean)
+  const raw=String(profile.rawText||'');
+  const parts=raw.split(/\n=== DOCUMENTO DE APOIO:/i);
+  const primary=parts[0]||'';
+  const support=parts.slice(1).join('\n');
+  const cleanLines=text=>String(text||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean)
     .filter(x=>!/(?:e-?mail|telefone|linkedin|instagram|cpf|cep|www\.|https?:)/i.test(x));
+  const primaryLines=cleanLines(primary).slice(0,55);
+  const supportLines=cleanLines(support).slice(0,45);
   const extras=[];
-  if((profile.skills||[]).length) extras.push('Skills: '+(profile.skills||[]).join(', '));
-  if(profile.additionalFacts) extras.push('Informações adicionais: '+profile.additionalFacts);
-  return [...lines.slice(0,70),...extras].filter(Boolean).join('\n').slice(0,3200);
+  if((profile.skills||[]).length) extras.push('COMPETÊNCIAS EXTRAÍDAS: '+(profile.skills||[]).join(', '));
+  if(profile.additionalFacts) extras.push('INFORMAÇÕES ADICIONAIS: '+profile.additionalFacts);
+  const blocks=['CURRÍCULO PRINCIPAL:',...primaryLines];
+  if(supportLines.length)blocks.push('PORTFÓLIO / DOCUMENTOS DE APOIO:',...supportLines);
+  blocks.push(...extras);
+  return blocks.filter(Boolean).join('\n').slice(0,5600);
 }
 function obviousUnsafeTerm(term,sourceText){
   const t=norm(term),src=norm(sourceText);
@@ -80,21 +90,63 @@ function obviousUnsafeTerm(term,sourceText){
   if(credentialRoots.some(root=>t.includes(root)&&!src.includes(root))) return true;
   return false;
 }
+function searchAliases(approved){
+  const out=[];
+  const strongSingles=new Set(['design','ux','ui','marketing','branding','conteudo','content','audiovisual','publicidade','comunicacao','midia','motion']);
+  for(const raw of approved){
+    const term=String(raw||'').trim();if(!term)continue;
+    out.push(term);
+    let base=term
+      .replace(/^(?:estagi[aá]ri[oa]|est[aá]gio|assistente|auxiliar|analista|designer)\s+(?:de|em|para)\s+/i,'')
+      .replace(/^(?:estagi[aá]ri[oa]|est[aá]gio|assistente|auxiliar|analista|designer)\s+/i,'')
+      .replace(/\s+(?:j[uú]nior|jr\.?|trainee)$/i,'')
+      .replace(/\s+designer$/i,'')
+      .trim();
+    const tokens=norm(base).split(/\s+/).filter(Boolean);
+    if(base.length>=2&&base.toLowerCase()!==term.toLowerCase()&&(tokens.length>=2||strongSingles.has(tokens[0])))out.push(base);
+  }
+  return [...new Set(out)];
+}
 export async function buildSearchTerms(profile, filters) {
   const typed=String(filters.area||'').split(/[,;/]/).map(x=>x.trim()).filter(Boolean);
   const curriculum=compactProfessionalText(profile);
   const basis=typed.length?`ÁREA PRETENDIDA: ${typed.join(', ')}\nCURRÍCULO: ${curriculum}`:curriculum;
-  const entryFallback=(filters.experienceLevel||'entry')==='entry'?['assistente administrativo','auxiliar administrativo','recepcionista','atendimento ao cliente','assistente comercial','customer success','inside sales','assistente de atendimento']:[];
-  const fallback=[...new Set([...relatedTerms(basis),...(typed.length?[]:inferredTerms(profile)),...entryFallback,...genericProfileTerms(profile)])];
-  const system='Você é o planejador de busca do LetsWork. Em UMA ÚNICA RESPOSTA, gere e revise uma família ampla de cargos plausíveis para o candidato. Use somente fatos profissionais comprovados e a área pretendida. Não invente formação, licença, registro, experiência ou senioridade. Não eleve credenciais. Use nomes curtos de cargos realmente usados em anúncios no Brasil. Antes de responder, elimine internamente duplicatas, variações cosméticas e funções incompatíveis. Retorne somente JSON.';
-  const prompt=`DADOS VERIFICADOS:\n${String(basis).slice(0,3600)}\n\nNÍVEL DE EXPERIÊNCIA: ${filters.experienceLevel||'entry'}\nGere de 24 a 32 cargos distintos, misturando funções diretas, adjacentes e de entrada compatíveis. Cada termo deve ter no máximo 5 palavras. Também liste até 8 títulos claramente incompatíveis. Retorne exatamente {"terms":[...],"exclude":[...]}.`;
-  const text=await askAI(system,prompt,{candidateId:profile.candidateId});
-  const parsed=parseJsonLoose(text);
-  const raw=Array.isArray(parsed?.terms)?parsed.terms.map(x=>String(x).trim()).filter(Boolean):[];
-  const generated=[...new Set(raw.filter(x=>!obviousUnsafeTerm(x,basis)).filter(x=>!/^(?:estudante|tecn[oó]logo|bacharel|graduando|graduanda|formado|formada|curso de)\b/i.test(x)))];
-  if(generated.length<12)throw new Error('ChatGPT não gerou termos de busca suficientes');
-  const exclusions=Array.isArray(parsed?.exclude)?[...new Set(parsed.exclude.map(x=>String(x).trim()).filter(x=>x.length>=3))].slice(0,8):[];
-  const final=[...new Set([...typed,...generated.slice(0,8),...fallback,...generated.slice(8)].map(x=>String(x).trim()).filter(Boolean))].slice(0,60);
+  const system='Você é o planejador de carreira e busca do LetsWork. Primeiro determine UMA árvore profissional-alvo para o candidato. Se houver ÁREA PRETENDIDA explícita, ela é a prioridade máxima. Caso contrário, derive o foco principalmente de graduação/formação em andamento ou concluída, cursos diretamente relacionados, portfólio e competências técnicas. Experiências antigas ou genéricas fora desse foco NÃO devem abrir uma segunda carreira. Expanda apenas para áreas profissionais adjacentes que usem a mesma formação/competências. Nível de entrada altera apenas senioridade dentro da mesma árvore: estágio, assistente ou júnior da área; nunca recepção, administrativo, vendas ou atendimento só por serem vagas de entrada. Não invente formação, licença, experiência ou senioridade. Retorne somente JSON.';
+  const prompt=`DADOS VERIFICADOS:\n${String(basis).slice(0,6000)}\n\nNÍVEL DE EXPERIÊNCIA: ${filters.experienceLevel||'entry'}\n\nMonte a árvore profissional e o plano de busca. core = cargos diretamente ligados ao foco. adjacent = cargos de áreas realmente adjacentes que aproveitam a MESMA formação, cursos, portfólio, ferramentas ou entregáveis profissionais. queries = termos de pesquisa com alto recall dentro EXATAMENTE dessa árvore: use nomes amplos da profissão, especialidades e sinônimos em português e inglês que sejam comuns em anúncios no Brasil. queries não são autorização para outra carreira. Exemplo: para Design visual/digital, queries podem conter Design Gráfico, Graphic Designer, UX, UI, Social Media, Content Designer, Motion Design, Branding, Audiovisual etc., se sustentados pelo currículo. Para Design visual/digital, trate também como adjacent cargos de Marketing, Publicidade, Comunicação, Social Media, Conteúdo e Mídias Digitais quando as atividades usarem criação visual, peças, redes sociais, identidade, edição de imagem/vídeo ou outros entregáveis sustentados pelo currículo/portfólio. Não exclua uma família inteira apenas porque uma ferramenta específica não aparece; a verificação posterior rejeitará a vaga se essa ferramenta for requisito obrigatório. Para outras formações, faça expansão análoga. exclude deve incluir tanto profissões incompatíveis quanto colisões de palavra-chave e especializações parecidas mas sem suporte factual no currículo; por exemplo, um currículo de design visual não deve aceitar automaticamente Design Educacional, Design de Interiores ou Designer de Sobrancelhas. Não inclua recepção, administrativo, vendas, atendimento, serviços gerais ou outra profissão apenas por ser vaga de entrada. Cada item deve ser curto. Gere 12–30 core, 10–30 adjacent e 12–40 queries quando houver base factual. Retorne exatamente {"focus":"...","core":[...],"adjacent":[...],"queries":[...],"exclude":[...]}.`;
+  const planDir=path.join(storage.data,'career-plan-cache');
+  fs.mkdirSync(planDir,{recursive:true});
+  const planHash=createHash('sha1').update(JSON.stringify({plannerVersion:'quality-agent-v4-role-tree',candidateId:profile.candidateId||0,basis,experienceLevel:filters.experienceLevel||'entry'})).digest('hex').slice(0,20);
+  const planFile=path.join(planDir,`plan_${planHash}.json`);
+  let parsed=null;
+  try{if(fs.existsSync(planFile))parsed=JSON.parse(fs.readFileSync(planFile,'utf8'));}catch{}
+  if(!parsed){
+    const text=await askAI(system,prompt,{candidateId:profile.candidateId});
+    parsed=parseJsonLoose(text)||{};
+    try{fs.writeFileSync(planFile,JSON.stringify(parsed),'utf8');}catch{}
+  }
+  const sanitize=list=>[...new Set((Array.isArray(list)?list:[]).map(x=>String(x).trim()).filter(Boolean).filter(x=>!obviousUnsafeTerm(x,basis)).filter(x=>!/^(?:estudante|tecn[oó]logo|bacharel|graduando|graduanda|formado|formada|curso de)\b/i.test(x)))];
+  let core=sanitize(parsed.core);
+  let adjacent=sanitize(parsed.adjacent).filter(x=>!core.includes(x));
+  let generated=[...core,...adjacent];
+  const plannedQueries=sanitize(parsed.queries);
+  if(generated.length<5){
+    const fallbackSeeds=sanitize([...genericProfileTerms(profile),...inferredTerms(profile)]);
+    const extras=fallbackSeeds.filter(x=>!generated.includes(x)).slice(0,24);
+    core=[...new Set([...core,...extras.slice(0,18)])];
+    adjacent=[...new Set([...adjacent,...extras.slice(18)])].filter(x=>!core.includes(x));
+    generated=[...core,...adjacent];
+  }
+  if(!generated.length&&!plannedQueries.length)throw new Error('Não foi possível inferir uma árvore profissional suficiente para este currículo');
+  const roleSeeds=generated.length?generated:plannedQueries.slice(0,24);
+  const derivedQueries=searchAliases([...typed,...roleSeeds,...plannedQueries.slice(0,24)]);
+  const queries=[...new Set([...plannedQueries,...derivedQueries])].slice(0,60);
+  const exclusions=Array.isArray(parsed.exclude)?[...new Set(parsed.exclude.map(x=>String(x).trim()).filter(x=>x.length>=3))].slice(0,24):[];
+  const final=[...new Set([...typed,...queries])].slice(0,60);
+  final.focus=String(parsed.focus||typed.join(', ')||'').trim();
+  final.core=[...new Set([...typed,...core])].slice(0,30);
+  final.adjacent=adjacent.slice(0,30);
+  final.queries=queries;
+  final.targets=[...new Set([...core,...adjacent,...plannedQueries,...derivedQueries])].slice(0,120);
   final.exclusions=exclusions;
   return final;
 }
@@ -133,7 +185,7 @@ async function searchRioVagasRecent(terms,filters,max=2200){
   while(page<=totalPages&&page<=30&&out.size<max&&Date.now()<deadline){
     const qs=new URLSearchParams({
       categories:'1',per_page:'100',page:String(page),orderby:'date',order:'desc',
-      after:cutoff,_fields:'id,date,link,title,excerpt'
+      after:cutoff,_fields:'id,date,link,title,excerpt,content'
     });
     try{
       const r=await fetch(`https://riovagas.com.br/wp-json/wp/v2/posts?${qs}`,{
@@ -145,7 +197,7 @@ async function searchRioVagasRecent(terms,filters,max=2200){
       const rows=await r.json();if(!Array.isArray(rows)||!rows.length)break;
       for(const row of rows){
         if(!String(row.link||'').includes('/riovagas/'))continue;
-        const title=decodeHtml(row.title?.rendered||''),description=decodeHtml(row.excerpt?.rendered||'');
+        const title=decodeHtml(row.title?.rendered||''),description=decodeHtml(row.content?.rendered||row.excerpt?.rendered||'');
         if(!title||!row.link)continue;
         out.set(row.link,{source:'RioVagas',title,url:row.link,description,company:'',salary:titleSalary(title),
           location:titleLocation(title),publishedAt:row.date?`${row.date}-03:00`:'',loginFreeCandidate:true,broadCollection:true});
@@ -194,8 +246,8 @@ async function blockNoise(page) {
 
 async function wordpressSearch(base, source, terms, max, filters={}) {
   const browser = await chromium.launch({ executablePath:CHROME, headless:true, args:['--no-sandbox'] });
-  const out=[], seen=new Set(), queue=terms.slice(0,source==='EmpregosRJ'?1:12);
-  const deadline=Date.now()+(source==='EmpregosRJ'?3500:45000);
+  const out=[], seen=new Set(), queue=[...new Set(terms)].slice(0,60);
+  const deadline=Date.now()+60000;
   const cutoff=Date.now()-Math.max(1,Math.min(60,Number(filters.recencyDays||15)))*86400000;
   let cursor=0;
   const parsePublished=value=>{
@@ -209,11 +261,11 @@ async function wordpressSearch(base, source, terms, max, filters={}) {
     try{
       while(cursor<queue.length&&out.length<max&&Date.now()<deadline){
         const term=queue[cursor++];
-        const maxPages=source==='EmpregosRJ'?1:8;
+        const maxPages=20;
         for(let n=1;n<=maxPages&&out.length<max&&Date.now()<deadline;n++){
           const prefix=n===1?base:`${base.replace(/\/$/,'')}/page/${n}/`;
           const url=`${prefix}?s=${encodeURIComponent(term)}`;
-          try{await page.goto(url,{waitUntil:'domcontentloaded',timeout:source==='EmpregosRJ'?3000:7000});}catch{break;}
+          try{await page.goto(url,{waitUntil:'domcontentloaded',timeout:7000});}catch{break;}
           const rows=await page.locator('article').evaluateAll(arts=>arts.map(a=>{
             const l=a.querySelector('h1 a,h2 a,h3 a,.entry-title a');
             const excerpt=a.querySelector('.entry-summary,.entry-content,.excerpt')?.textContent?.trim()||'';
@@ -235,7 +287,7 @@ async function wordpressSearch(base, source, terms, max, filters={}) {
       }
     }finally{await page.close();}
   }
-  try{await Promise.all(Array.from({length:Math.min(source==='EmpregosRJ'?1:2,queue.length)},()=>worker()));}
+  try{await Promise.all(Array.from({length:Math.min(4,queue.length||1)},()=>worker()));}
   finally{await browser.close();}
   return uniqByUrl(out).slice(0,max);
 }
@@ -269,29 +321,31 @@ async function searchJooble(terms, filters, max) {
   const key = process.env.JOOBLE_API_KEY;
   if (!key) return [];
   const out = [];
-  const deadline=Date.now()+30000;
-  for (const term of terms.slice(0,10)) {
+  const deadline=Date.now()+60000;
+  for (const term of [...new Set(terms)].slice(0,60)) {
     if (out.length >= max || Date.now()>=deadline) break;
-    const body = { keywords:term, location:[filters.city,filters.state].filter(Boolean).join(', '), page:1 };
-    try {
-      const res = await fetch(`https://br.jooble.org/api/${key}`,{
-        method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(7000)
-      });
-      if (!res.ok) continue;
-      const data = await res.json();
-      for (const j of data.jobs || []) out.push({
-        source:'Jooble', title:j.title||'', company:j.company||'', salary:j.salary||'',
-        location:j.location||'', url:j.link||'', description:j.snippet||'', contractType:j.type||'', publishedAt:j.updated||j.date||''
-      });
-    } catch {}
+    for(let page=1;page<=10&&out.length<max&&Date.now()<deadline;page++){
+      const body = { keywords:term, location:[filters.city,filters.state].filter(Boolean).join(', '), page };
+      try {
+        const res = await fetch(`https://br.jooble.org/api/${key}`,{
+          method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(7000)
+        });
+        if (!res.ok) break;
+        const data = await res.json(); const rows=data.jobs||[]; if(!rows.length)break;
+        for (const j of rows) out.push({
+          source:'Jooble', title:j.title||'', company:j.company||'', salary:j.salary||'',
+          location:j.location||'', url:j.link||'', description:j.snippet||'', contractType:j.type||'', publishedAt:j.updated||j.date||''
+        });
+      } catch { break; }
+    }
   }
   return uniqByUrl(out).slice(0,max);
 }
 
 async function searchRemotive(terms, max) {
   const out = [];
-  const deadline=Date.now()+35000;
-  for (const term of terms.slice(0,8)) {
+  const deadline=Date.now()+60000;
+  for (const term of [...new Set(terms)].slice(0,60)) {
     if (out.length >= max || Date.now()>=deadline) break;
     try {
       const res = await fetch(`https://remotive.com/api/remote-jobs?search=${encodeURIComponent(term)}&limit=${Math.min(100,max)}`,{signal:AbortSignal.timeout(7000)});
@@ -320,7 +374,7 @@ function sourceCachePath(name,terms,filters){
   const basis=JSON.stringify({
     name,
     strategy:name==='RioVagas'?'wp_api_recent_v3':'default_v1',
-    terms:name==='RioVagas'?[]:terms.slice(0,12).map(norm),
+    terms:name==='RioVagas'?[]:terms.slice(0,60).map(norm),
     city:name==='RioVagas'?'':norm(filters.city),
     state:name==='RioVagas'?'RJ':norm(filters.state),
     nationwide:Boolean(filters.nationwide),
@@ -369,14 +423,26 @@ function canonicalJobUrl(value){
     return u.toString().replace(/\/$/,'');
   }catch{return String(value||'').trim().replace(/\/$/,'');}
 }
-function dedupeJobs(rows){
+function likelyJobDetail(job){
+  const title=norm(job?.title),url=String(job?.url||'');
+  if(!title||!url)return false;
+  if(/^(?:\d+\s+)?vagas?\s+(?:de|para)\b|^vagas? de emprego\b|\bvagas? dispon[ií]veis?\b/.test(title))return false;
+  if(/linkedin\.com\/jobs\/(?!view\/)[^?]*vagas/i.test(url))return false;
+  if(/indeed\.com\/(?:q-|jobs\?)/i.test(url))return false;
+  if(/glassdoor\.com\.br\/Vaga\/.*SRCH_/i.test(url))return false;
+  if(/catho\.com\.br\/vagas\/[^/]+\/(?:rio-de-janeiro-rj|sao-paulo-sp|[^/]+-[a-z]{2})\/?(?:\?|$)/i.test(url))return false;
+  if(/talent\.com\/(?:view|jobs)?\/?(?:\?|$)/i.test(url)&&!/job\//i.test(url))return false;
+  return true;
+}
+export function dedupeJobs(rows){
   const out=[],seenUrl=new Set(),seenSemantic=new Set();
   for(const job of rows){
-    if(!job?.url||!job?.title) continue;
+    if(!job?.url||!job?.title||!likelyJobDetail(job)) continue;
     const urlKey=canonicalJobUrl(job.url);
     const day=String(job.publishedAt||'').slice(0,10);
-    const semantic=[norm(job.title),norm(job.company),norm(job.location),day].join('|');
-    const semanticStrong=norm(job.title).length>4&&norm(job.company).length>2&&day;
+    const semantic=[norm(job.title),norm(job.company),norm(job.location),norm(job.salary),day].join('|');
+    const rio=/^RioVagas$/i.test(String(job.source||''))||/riovagas\.com\.br/i.test(String(job.url||''));
+    const semanticStrong=norm(job.title).length>4&&Boolean(day)&&(norm(job.company).length>2||rio);
     if(seenUrl.has(urlKey)||(semanticStrong&&seenSemantic.has(semantic))) continue;
     seenUrl.add(urlKey);if(semanticStrong)seenSemantic.add(semantic);out.push(job);
   }
@@ -394,33 +460,45 @@ export async function searchJobs(profile, filters, suppliedTerms=null) {
   const wantsRj=filters.nationwide||!region||/\brj\b|rio de janeiro|niteroi|nova iguacu|duque de caxias|sao goncalo/.test(region);
   const safe=p=>p.catch(e=>{console.log('[busca] fonte falhou:',String(e?.message||e));return [];});
   const timed=(name,p,timeoutMs=65000)=>{const t=Date.now();return new Promise(resolve=>{let done=false;const timer=setTimeout(()=>{if(done)return;done=true;console.log(`[busca] ${name}: timeout após ${(timeoutMs/1000).toFixed(0)}s; seguindo com as demais fontes`);resolve([]);},timeoutMs);safe(p).then(rows=>{if(done)return;done=true;clearTimeout(timer);console.log(`[busca] ${name}: ${rows.length} vagas em ${((Date.now()-t)/1000).toFixed(1)}s`);resolve(rows);});});};
-  // Fontes primárias entram primeiro e têm fallback persistente próprio.
-  // Um pequeno head start evita que navegadores secundários disputem CPU/rede logo no início.
-  const primaryWork=Promise.all([
-    timed('Vagas.com',prioritySource('Vagas.com',searchVagasCom(terms,filters,Math.min(1800,perSource)),terms,filters,Math.min(1800,perSource))),
-    wantsRj?timed('RioVagas',prioritySource('RioVagas',searchRioVagasRecent(terms,filters,Math.min(2200,perSource)),terms,filters,Math.min(2200,perSource))):Promise.resolve([])
-  ]);
-  await delay(1000);
-  const secondaryWork=Promise.all([
-    timed('LinkedIn',searchLinkedIn(terms,filters,Math.min(1600,perSource))),
-    timed('Gupy',searchGupy(terms,filters,Math.min(1200,perSource))),
-    timed('Tramper',prioritySource('Tramper',searchTramper(terms,filters,Math.min(800,perSource)),terms,filters,Math.min(800,perSource))),
-    timed('Huanna',prioritySource('Huanna',searchHuanna(terms,filters,Math.min(500,perSource)),terms,filters,Math.min(500,perSource))),
-    timed('BeaVagas',prioritySource('BeaVagas',searchBeaVagas(terms,filters,Math.min(500,perSource)),terms,filters,Math.min(500,perSource))),
-    timed('EmpregoDaqui',prioritySource('EmpregoDaqui',searchEmpregoDaqui(terms,filters,Math.min(500,perSource)),terms,filters,Math.min(500,perSource))),
-    wantsRemote?timed('Remotive',searchRemotive(terms,Math.min(300,perSource))):Promise.resolve([]),
-    timed('Jooble',searchJooble(terms,filters,Math.min(900,perSource))),
-    timed('Adzuna',searchAdzuna(terms,filters,Math.min(900,perSource)))
-  ]);
-  const [[vagas,rio],[linkedin,gupy,tramper,huanna,beavagas,empregodaqui,remotive,jooble,adzuna]]=await Promise.all([primaryWork,secondaryWork]);
-  const [empregos,linkvagas]=await Promise.all([
-    wantsRj?timed('EmpregosRJ',wordpressSearch('https://empregosrj.com.br/','EmpregosRJ',terms,Math.min(600,perSource),filters)):Promise.resolve([]),
-    timed('Link Vagas',searchLinkVagas(terms,filters,Math.min(700,perSource)))
-  ]);
+  async function runSourceQueue(tasks,limit=4){
+    const results={};let cursor=0;
+    async function worker(){
+      while(cursor<tasks.length){
+        const index=cursor++,task=tasks[index];
+        try{results[task.key]=await task.run();}catch(e){console.log('[busca] fonte falhou:',task.key,String(e?.message||e));results[task.key]=[];}
+      }
+    }
+    await Promise.all(Array.from({length:Math.min(limit,tasks.length)},()=>worker()));
+    return results;
+  }
+  const sourceResults=await runSourceQueue([
+    {key:'vagas',run:()=>timed('Vagas.com',prioritySource('Vagas.com',searchVagasCom(terms,filters,Math.min(1800,perSource)),terms,filters,Math.min(1800,perSource)),75000)},
+    {key:'rio',run:()=>wantsRj?timed('RioVagas',prioritySource('RioVagas',searchRioVagasRecent(terms,filters,Math.min(2200,perSource)),terms,filters,Math.min(2200,perSource)),75000):Promise.resolve([])},
+    {key:'linkedin',run:()=>timed('LinkedIn',searchLinkedIn(terms,filters,Math.min(1600,perSource)),90000)},
+    {key:'gupy',run:()=>timed('Gupy',searchGupy(terms,filters,Math.min(1200,perSource)),90000)},
+    {key:'tramper',run:()=>timed('Tramper',prioritySource('Tramper',searchTramper(terms,filters,Math.min(800,perSource)),terms,filters,Math.min(800,perSource)),75000)},
+    {key:'huanna',run:()=>timed('Huanna',prioritySource('Huanna',searchHuanna(terms,filters,Math.min(500,perSource)),terms,filters,Math.min(500,perSource)),75000)},
+    {key:'beavagas',run:()=>timed('BeaVagas',prioritySource('BeaVagas',searchBeaVagas(terms,filters,Math.min(500,perSource)),terms,filters,Math.min(500,perSource)),75000)},
+    {key:'empregodaqui',run:()=>timed('EmpregoDaqui',prioritySource('EmpregoDaqui',searchEmpregoDaqui(terms,filters,Math.min(500,perSource)),terms,filters,Math.min(500,perSource)),75000)},
+    {key:'remotive',run:()=>wantsRemote?timed('Remotive',searchRemotive(terms,Math.min(300,perSource)),75000):Promise.resolve([])},
+    {key:'jooble',run:()=>timed('Jooble',searchJooble(terms,filters,Math.min(900,perSource)),75000)},
+    {key:'adzuna',run:()=>timed('Adzuna',searchAdzuna(terms,filters,Math.min(900,perSource)),75000)},
+    {key:'empregos',run:()=>wantsRj?timed('EmpregosRJ',wordpressSearch('https://empregosrj.com.br/','EmpregosRJ',terms,Math.min(600,perSource),filters),75000):Promise.resolve([])},
+    {key:'linkvagas',run:()=>timed('Link Vagas',searchLinkVagas(terms,filters,Math.min(700,perSource)),75000)},
+    {key:'webjobs',run:()=>timed('Web',prioritySource('Web',searchWebJobs(terms,filters,Math.min(1800,perSource)),terms,filters,Math.min(1800,perSource)),90000)},
+    {key:'infojobs',run:()=>timed('InfoJobs',prioritySource('InfoJobs',searchInfoJobs(terms,filters,Math.min(1400,perSource)),terms,filters,Math.min(1400,perSource)),90000)},
+    {key:'trabalhabrasil',run:()=>timed('Trabalha Brasil',prioritySource('Trabalha Brasil',searchTrabalhaBrasil(terms,filters,Math.min(1000,perSource)),terms,filters,Math.min(1000,perSource)),100000)}
+  ],Math.max(2,Math.min(5,Number(process.env.SEARCH_SOURCE_WORKERS||4))));
+  const {vagas=[],rio=[],linkedin=[],gupy=[],tramper=[],huanna=[],beavagas=[],empregodaqui=[],remotive=[],jooble=[],adzuna=[],empregos=[],linkvagas=[],webjobs=[],infojobs=[],trabalhabrasil=[]}=sourceResults;
+
   // Coleta ampla só com listagens/cards. A página completa continua reservada
   // para o processamento da vaga; não existe mais teto de 500 na coleta.
   const wordpress=interleave(rio,empregos).slice(0,perSource);
-  const pooled=dedupeJobs(interleave(wordpress,vagas,tramper,huanna,beavagas,empregodaqui,linkedin,gupy,linkvagas,jooble,adzuna,remotive));
-  console.log(`[busca] pool deduplicado: ${pooled.length}`);
-  return pooled.slice(0,poolCap);
+  const pooled=dedupeJobs(interleave(webjobs,infojobs,trabalhabrasil,wordpress,vagas,tramper,huanna,beavagas,empregodaqui,linkedin,gupy,linkvagas,jooble,adzuna,remotive));
+  const cachedPool=loadSourceCache('SearchPool',terms,filters);
+  const stablePool=dedupeJobs([...pooled,...cachedPool]).slice(0,poolCap);
+  saveSourceCache('SearchPool',terms,filters,stablePool);
+  if(cachedPool.length&&stablePool.length>pooled.length)console.log(`[busca] pool: preservando ${stablePool.length-pooled.length} vagas recentes da pesquisa anterior`);
+  console.log(`[busca] pool deduplicado estável: ${stablePool.length}`);
+  return stablePool;
 }

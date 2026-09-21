@@ -49,7 +49,7 @@ O produto é um aplicativo desktop local para Windows. Ele deve:
 - Electron 44.
 - Janela maximizada.
 - Backend Express local em 127.0.0.1:4317.
-- IA via sessão persistente do ChatGPT web, GPT-5.6 Sol High, controlada localmente por CDP em 127.0.0.1:9223. O Chromium dedicado roda fora da tela e sem ícone na barra de tarefas; o CDP força a página como ativa para preservar o streaming. Não há Ollama/Llama nem fallback para API oficial.
+- IA via sessão persistente do ChatGPT web, GPT-5.6 Sol High, controlada localmente por CDP em 127.0.0.1:9333. O Chromium dedicado roda fora da tela e sem ícone na barra de tarefas; o CDP força a página como ativa para preservar o streaming. Não há Ollama/Llama nem fallback para API oficial.
 - Build portátil para Windows.
 - Assinatura local Authenticode com certificado “LetsWork Local Code Signing”.
 

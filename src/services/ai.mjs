@@ -2,12 +2,13 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-const CHATGPT_CDP_URL=process.env.CHATGPT_CDP_URL || 'http://127.0.0.1:9223';
+const CHATGPT_CDP_URL=process.env.CHATGPT_CDP_URL || 'http://127.0.0.1:9333';
 const CHATGPT_MODEL=process.env.CHATGPT_WEB_MODEL || 'GPT-5.6 Sol';
 const CHATGPT_LEVEL=process.env.CHATGPT_WEB_LEVEL || 'high';
 const MIN_GAP_MS=Math.max(500,Number(process.env.CHATGPT_MIN_GAP_MS||1500));
 const RATE_BACKOFF_MS=Math.max(30000,Number(process.env.CHATGPT_RATE_LIMIT_BACKOFF_MS||60000));
-const REQUEST_TIMEOUT_MS=Math.max(60000,Number(process.env.CHATGPT_WEB_TIMEOUT_MS||330000));
+const REQUEST_TIMEOUT_MS=Math.max(45000,Number(process.env.CHATGPT_WEB_TIMEOUT_MS||90000));
+const REUSE_CONVERSATIONS=/^(1|true|yes)$/i.test(String(process.env.CHATGPT_REUSE_CONVERSATIONS||'false'));
 const DATA_ROOT=process.env.LETSWORK_DATA_ROOT || path.join(os.homedir(),'LetsWork','dados');
 const CONVERSATION_FILE=path.join(DATA_ROOT,'chatgpt-conversations.json');
 
@@ -73,7 +74,7 @@ function cdpSession(wsUrl){
     if(closed)throw new Error('Sessão CDP encerrada');
     return new Promise((resolve,reject)=>{
       const id=++seq;
-      const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`Timeout CDP em ${method}`));},8000);
+      const timer=setTimeout(()=>{pending.delete(id);reject(new Error(`Timeout CDP em ${method}`));},30000);
       pending.set(id,{resolve,reject,timer});
       ws.send(JSON.stringify({id,method,params}));
     });
@@ -125,18 +126,20 @@ async function navigate(cdp,url){
 }
 async function ensureCandidateConversation(cdp,candidateId){
   const key=candidateKey(candidateId);
-  const mapped=cleanConversationUrl(conversations[key]?.url||'');
   let state=await pageState(cdp);
+  if(!REUSE_CONVERSATIONS){
+    if(cleanConversationUrl(state?.url)||!String(state?.url||'').startsWith('https://chatgpt.com'))state=await navigate(cdp,'https://chatgpt.com/');
+    else state=await waitPageReady(cdp);
+    return {key,state};
+  }
+  const mapped=cleanConversationUrl(conversations[key]?.url||'');
   if(mapped){
     if(cleanConversationUrl(state?.url)!==mapped)state=await navigate(cdp,mapped);
     else state=await waitPageReady(cdp);
     return {key,state};
   }
-  if(cleanConversationUrl(state?.url)||!String(state?.url||'').startsWith('https://chatgpt.com')){
-    state=await navigate(cdp,'https://chatgpt.com/');
-  }else{
-    state=await waitPageReady(cdp);
-  }
+  if(cleanConversationUrl(state?.url)||!String(state?.url||'').startsWith('https://chatgpt.com'))state=await navigate(cdp,'https://chatgpt.com/');
+  else state=await waitPageReady(cdp);
   return {key,state};
 }
 async function rememberCandidateConversation(cdp,key){
@@ -160,8 +163,14 @@ async function setComposer(cdp,text){
   if(!inserted)throw new Error('Não foi possível preencher o composer do ChatGPT');
 }
 async function clickSend(cdp){
-  const ok=await evalValue(cdp,`(()=>{const b=document.querySelector('[data-testid="send-button"]');if(!b||b.disabled)return false;b.click();return true;})()`);
-  if(!ok)throw new Error('Botão de envio do ChatGPT indisponível');
+  const ok=await evalValue(cdp,`(()=>{const selectors=['[data-testid="send-button"]','[data-testid="composer-submit-button"]','button[aria-label*="Enviar"]','button[aria-label*="Send"]'];const b=selectors.map(s=>document.querySelector(s)).find(x=>x&&x.offsetParent!==null&&!x.disabled);if(!b)return false;b.click();return true;})()`);
+  if(ok)return true;
+  await cdp.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
+  await cdp.send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
+  await sleep(200);
+  const sent=await evalValue(cdp,`(()=>{const e=document.querySelector('#prompt-textarea');const text=(e?.innerText||e?.textContent||e?.value||'').trim();const stop=document.querySelector('[data-testid="stop-button"],button[aria-label*="Interromper"],button[aria-label*="Stop"]');return !text||!!(stop&&stop.offsetParent!==null);})()`).catch(()=>false);
+  if(!sent)throw new Error('Envio do ChatGPT indisponível');
+  return true;
 }
 async function messageSnapshot(cdp){
   return evalValue(cdp,`(()=>{const clean=e=>(e?.innerText||'').trim();const turns=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')].map(e=>{const testid=e.getAttribute('data-testid')||'';const n=Number((testid.match(/conversation-turn-(\\d+)/)||[])[1]||-1);const author=e.querySelector('[data-message-author-role]')?.getAttribute('data-message-author-role')||e.getAttribute('data-message-author-role')||'';return {turn:n,testid,author,text:clean(e)};}).filter(x=>x.text);const direct=[...document.querySelectorAll('[data-message-author-role="assistant"]')].map(e=>clean(e)).filter(Boolean);return {turns,direct,lastTurn:Math.max(-1,...turns.map(x=>x.turn))};})()`);
@@ -209,9 +218,8 @@ async function runPrompt(system,prompt,{candidateId=null,clearRateModal=false}={
     await cdp.send('Page.enable');
     await forcePageActive(cdp);
     if(clearRateModal)await dismissRateLimitModal(cdp).catch(()=>false);
-    let state=await pageState(cdp);
-    if(!state?.loggedIn)throw new Error('Sessão do ChatGPT não está logada');
-    if(state?.rateLimited){await dismissRateLimitModal(cdp).catch(()=>false);await sleep(250);state=await pageState(cdp);}
+    let state=await waitPageReady(cdp,Math.min(45000,REQUEST_TIMEOUT_MS));
+    if(state?.rateLimited){await dismissRateLimitModal(cdp).catch(()=>false);await sleep(250);state=await waitPageReady(cdp,15000);}
 
     const {key}=await ensureCandidateConversation(cdp,candidateId);
     const before=await messageSnapshot(cdp);
@@ -251,8 +259,8 @@ export async function aiStatus(){
       await cdp.opened;
       await cdp.send('Runtime.enable');
       await forcePageActive(cdp);
-      const state=await pageState(cdp);
-      return {engine:'chatgpt-web-cdp',online:!!state?.loggedIn,model:CHATGPT_MODEL,level:CHATGPT_LEVEL,loggedIn:!!state?.loggedIn,rateLimited:!!state?.rateLimited};
+      const state=await waitPageReady(cdp,8000).catch(()=>pageState(cdp).catch(()=>null));
+      return {engine:'chatgpt-web-cdp',online:!!(state?.loggedIn&&state?.composer),model:CHATGPT_MODEL,level:CHATGPT_LEVEL,loggedIn:!!state?.loggedIn,rateLimited:!!state?.rateLimited};
     }finally{cdp.close();}
   }catch{
     return {engine:'chatgpt-web-cdp',online:false,model:CHATGPT_MODEL,level:CHATGPT_LEVEL,loggedIn:false,rateLimited:false};

@@ -128,14 +128,34 @@ function guessName(text){
 }
 
 export function inferProfile(text){
-  const clean=String(text||'').replace(/\s+/g,' ').trim();
+  const raw=String(text||'');
+  const lines=raw.split(/\r?\n/).map(x=>x.replace(/\s+/g,' ').trim()).filter(Boolean);
+  const clean=raw.replace(/\s+/g,' ').trim();
   const lower=clean.toLowerCase();
   const email=clean.match(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/)?.[0]||'';
   const phone=clean.match(/(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?9?\d{4}[-\s]?\d{4}/)?.[0]||'';
   const links=[...clean.matchAll(/https?:\/\/[^\s)]+/g)].map(x=>x[0]);
   const linkedin=links.find(x=>/linkedin\.com/i.test(x))||'';
-  const portfolio=links.find(x=>!/linkedin\.com/i.test(x))||'';
-  const skills=skillWords.filter(x=>lower.includes(x));
-  return {name:guessName(text),email,phone,linkedin,portfolio,instagram:'',skills,rawText:text,
-    cpf:'',birthDate:'',cep:'',address:'',neighborhood:'',additionalFacts:''};
+  const instagram=links.find(x=>/instagram\.com/i.test(x))||'';
+  const portfolio=links.find(x=>!/linkedin\.com|instagram\.com/i.test(x))||'';
+  const skills=skillWords.filter(x=>{
+    const k=String(x||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+    const hay=lower.normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+    const esc=k.replace(/[.*+?^$()|[\]{}\\]/g,'\\  const skills=skillWords.filter(x=>lower.includes(x));').replace(/\s+/g,'\\s+');
+    return new RegExp('(^|[^a-z0-9])'+esc+'([^a-z0-9]|$)','i').test(hay);
+  });
+  const labeled=(rx)=>{const line=lines.find(x=>rx.test(x));return line?.replace(rx,'').replace(/^\s*[:\-–—]\s*/,'').trim()||'';};
+  const cpf=(labeled(/^(?:cpf)\b/i)||clean.match(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/)?.[0]||'').trim();
+  const cep=(labeled(/^(?:cep)\b/i)||clean.match(/\b\d{5}-?\d{3}\b/)?.[0]||'').trim();
+  const birthDate=(labeled(/^(?:data de nascimento|nascimento)\b/i).match(/\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{4}\b/)?.[0]||'').trim();
+  let address=labeled(/^(?:endere[cç]o|logradouro)\b/i);
+  if(!address)address=lines.find(x=>/^(?:rua|avenida|av\.?|estrada|travessa|alameda|rodovia|pra[cç]a)\b/i.test(x))||'';
+  let neighborhood=labeled(/^(?:bairro)\b/i),residenceCity='',residenceState='';
+  const locLine=lines.find(x=>/^(?:AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\s*[-–—]\s*[^-–—]+\s*[-–—]\s*[^-–—]+$/i.test(x));
+  if(locLine){
+    const parts=locLine.split(/\s*[-–—]\s*/).map(x=>x.trim()).filter(Boolean);
+    if(parts.length>=3){residenceState=parts[0];residenceCity=parts[1];if(!neighborhood)neighborhood=parts.slice(2).join(' - ');}
+  }
+  return {name:guessName(text),email,phone,linkedin,portfolio,instagram,skills,rawText:text,
+    cpf,birthDate,cep,address,neighborhood,residenceCity,residenceState,additionalFacts:''};
 }

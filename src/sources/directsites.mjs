@@ -62,7 +62,7 @@ async function huannaMeta(url){
 }
 
 export async function searchTramper(terms,filters,max=500){
-  const b=await browser(),out=[];
+  const b=await browser(),out=[],deadline=Date.now()+45000;
   try{
     const p=await b.newPage({locale:'pt-BR'});
     await p.goto('https://tramper.com.br/vagas',{waitUntil:'domcontentloaded',timeout:20000});
@@ -70,7 +70,7 @@ export async function searchTramper(terms,filters,max=500){
     const rows=await pageLinks(p,'a[href^="/vaga/"],a[href*="tramper.com.br/vaga/"]','https://tramper.com.br/');
     await p.close();
     for(const r of rows){
-      if(out.length>=max)break;
+      if(out.length>=max||Date.now()>=deadline)break;
       const text=r.text.replace(/\bVer vaga\b/gi,'').trim();
       const snap=await detailSnapshot(r.href,b),detail=snap.body;
       const lines=detail.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
@@ -89,10 +89,10 @@ export async function searchTramper(terms,filters,max=500){
 }
 
 export async function searchHuanna(terms,filters,max=500){
-  const b=await browser(),out=[],seen=new Set();
+  const b=await browser(),out=[],seen=new Set(),deadline=Date.now()+45000;
   try{
     const p=await b.newPage({locale:'pt-BR'});
-    for(let pg=1;pg<=8&&out.length<max;pg++){
+    for(let pg=1;pg<=8&&out.length<max&&Date.now()<deadline;pg++){
       const url='https://huanna.com.br/vagas'+(pg>1?`?page=${pg}`:'');
       try{await p.goto(url,{waitUntil:'domcontentloaded',timeout:16000});}catch{break;}
       const rows=(await pageLinks(p,'a[href^="/vagas/"]','https://huanna.com.br/')).filter(x=>!x.href.endsWith('/candidatar'));
@@ -122,10 +122,10 @@ export async function searchHuanna(terms,filters,max=500){
 }
 
 export async function searchBeaVagas(terms,filters,max=500){
-  const b=await browser(),out=[],seen=new Set();
+  const b=await browser(),out=[],seen=new Set(),deadline=Date.now()+45000;
   try{
     const p=await b.newPage({locale:'pt-BR'});
-    for(let pg=1;pg<=12&&out.length<max;pg++){
+    for(let pg=1;pg<=12&&out.length<max&&Date.now()<deadline;pg++){
       try{await p.goto(`https://beavagas.com.br/vagas?page=${pg}`,{waitUntil:'domcontentloaded',timeout:16000});}catch{break;}
       const rows=await pageLinks(p,'a[href*="/vagas/p/"]','https://beavagas.com.br/');
       if(!rows.length)break;
@@ -151,7 +151,7 @@ export async function searchBeaVagas(terms,filters,max=500){
 }
 
 export async function searchEmpregoDaqui(terms,filters,max=500){
-  const b=await browser(),out=[],seen=new Set();
+  const b=await browser(),out=[],seen=new Set(),deadline=Date.now()+45000;
   try{
     const p=await b.newPage({locale:'pt-BR'});
     await p.goto('https://empregodaqui.com.br/vagas',{waitUntil:'domcontentloaded',timeout:16000});
@@ -161,7 +161,7 @@ export async function searchEmpregoDaqui(terms,filters,max=500){
     if(filters.nationwide)selected=cityLinks.slice(0,20);
     selected=[...new Map(selected.map(x=>[x.href,x])).values()].slice(0,20);
     for(const city of selected){
-      if(out.length>=max)break;
+      if(out.length>=max||Date.now()>=deadline)break;
       try{await p.goto(city.href,{waitUntil:'domcontentloaded',timeout:14000});}catch{continue;}
       const jobs=await pageLinks(p,'a[href^="/vaga/"]','https://empregodaqui.com.br/');
       for(const r of jobs){

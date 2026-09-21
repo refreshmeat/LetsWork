@@ -28,16 +28,19 @@ async function guestPage(term,location,days,start){
   return [];
 }
 export async function searchLinkedIn(terms,filters,max=350){
-  const out=[],seen=new Set(),days=Math.max(1,Math.min(60,Number(filters.recencyDays||15))),location=locationText(filters),deadline=Date.now()+50000;
-  const starts=[0,25,50,75,100,125,150,175,200,225];
-  for(const term of terms.slice(0,32)){
-    if(out.length>=max||Date.now()>=deadline)break;
-    for(const start of starts){
-      if(out.length>=max||Date.now()>=deadline)break;
-      const rows=await guestPage(term,location,days,start);
-      for(const job of rows){const key=job.url.replace(/[?&].*$/,'');if(seen.has(key))continue;seen.add(key);out.push(job);if(out.length>=max)break;}
-      await delay(100);
+  const out=[],seen=new Set(),days=Math.max(1,Math.min(60,Number(filters.recencyDays||15))),location=locationText(filters),deadline=Date.now()+70000;
+  const queue=[...new Set(terms)].slice(0,60);let cursor=0;
+  async function worker(){
+    while(cursor<queue.length&&out.length<max&&Date.now()<deadline){
+      const term=queue[cursor++];let start=0,empty=0,pages=0;
+      while(out.length<max&&Date.now()<deadline&&pages<40){
+        const rows=await guestPage(term,location,days,start);pages++;start+=25;
+        if(!rows.length){empty++;if(empty>=2)break;}else empty=0;
+        for(const job of rows){const key=job.url.replace(/[?&].*$/,'');if(seen.has(key))continue;seen.add(key);out.push(job);if(out.length>=max)break;}
+        await delay(80);
+      }
     }
   }
+  await Promise.all(Array.from({length:Math.min(4,queue.length||1)},()=>worker()));
   return uniq(out).slice(0,max);
 }

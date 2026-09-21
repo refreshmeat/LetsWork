@@ -12,7 +12,7 @@ RioVagas e Vagas.com são fontes prioritárias. LinkedIn e Gupy continuam sendo 
 
 ## IA e currículos
 
-A única IA usada pelo LetsWork é a sessão persistente do ChatGPT web, configurada no perfil dedicado em GPT-5.6 Sol com nível High. O app controla essa sessão localmente por CDP em `127.0.0.1:9223`; não há Ollama/Llama nem fallback para a API oficial da OpenAI.
+A única IA usada pelo LetsWork é a sessão persistente do ChatGPT web, configurada no perfil dedicado em GPT-5.6 Sol com nível High. O app controla essa sessão localmente por CDP em `127.0.0.1:9333`; não há Ollama/Llama nem fallback para a API oficial da OpenAI.
 
 Cada candidato mantém uma única conversa persistente do ChatGPT, cuja URL é salva localmente. A mesma conversa gera termos de busca, seleciona conteúdo relevante, adapta cada currículo e responde perguntas de formulário quando necessário. O Playwright continua responsável pela navegação, preenchimento e envio das candidaturas.
 

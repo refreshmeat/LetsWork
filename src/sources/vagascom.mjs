@@ -31,7 +31,7 @@ function indexedTitle(raw,url){
 async function searchIndexedVagas(terms,filters,max=400){
   const out=new Map(),cutoff=new Date(Date.now()-Math.max(1,Math.min(60,Number(filters.recencyDays||15)))*86400000).toISOString().slice(0,10);
   const place=!filters.nationwide?(filters.city||filters.state||'Brasil'):'Brasil';
-  for(const term of terms.slice(0,10)){
+  for(const term of [...new Set(terms)].slice(0,60)){
     if(out.size>=max)break;
     const q=`site:vagas.com.br/vagas "${term}" "${place}" after:${cutoff}`;
     try{
@@ -97,7 +97,7 @@ async function indexedFallback(terms,filters,max=400){
   const out=new Map(),days=Math.max(1,Math.min(60,Number(filters.recencyDays||15)));
   const cutoff=Date.now()-days*86400000;
   const place=!filters.nationwide?(filters.city||filters.state||''):'';
-  for(const term of terms.slice(0,14)){
+  for(const term of [...new Set(terms)].slice(0,60)){
     if(out.size>=max)break;
     const q=['site:vagas.com.br/vagas/v',term,place].filter(Boolean).join(' ');
     try{
@@ -144,37 +144,36 @@ export async function searchVagasCom(terms,filters,max=400){
   const stateValue=!filters.nationwide?(stateNames[uf]||String(filters.state||filters.states?.[0]||'').trim()):'';
   let anySuccess=false,lastBlockedStatus=0;
 
-  const broadSlug=normSlug(stateValue);
-  const queryTerms=[...new Set([...(stateValue?[stateValue]:[]),...terms])].slice(0,18);
-  for(const term of queryTerms){
-    if(jobs.size>=max||Date.now()>=deadline)break;
-    const termSlug=normSlug(term);
-    const pathname=`/vagas-de-${termSlug}`;
-    const isBroad=Boolean(broadSlug)&&termSlug===broadSlug;
-    const pageCap=isBroad?8:1;
-    for(let page=1;page<=pageCap&&jobs.size<max&&Date.now()<deadline;page++){
-      const qs=new URLSearchParams({ordenar_por:'mais_recentes'});
-      if(stateValue)qs.append('e[]',stateValue);
-      if(page>1)qs.set('pagina',String(page));
-      const {response,host,status}=await fetchSearch(pathname,qs);
-      if(!response){lastBlockedStatus=status||lastBlockedStatus;break;}
-      if(!response.ok)break;
-      anySuccess=true;
-      const rows=parsePage(await response.text(),host);
-      if(!rows.length)break;
-      let dated=0,old=0;
-      for(const job of rows){
-        const ms=dateMs(job.publishedAt);
-        if(!ms)continue;
-        dated++;
-        if(ms<cutoff){old++;continue;}
-        jobs.set(job.url,{...(jobs.get(job.url)||{}),...job,broadCollection:isBroad});
+  const queryTerms=[...new Set(terms)].slice(0,60);let cursor=0;
+  async function worker(){
+    while(cursor<queryTerms.length&&jobs.size<max&&Date.now()<deadline){
+      const term=queryTerms[cursor++],termSlug=normSlug(term),pathname=`/vagas-de-${termSlug}`;
+      for(let page=1;page<=20&&jobs.size<max&&Date.now()<deadline;page++){
+        const qs=new URLSearchParams({ordenar_por:'mais_recentes'});
+        if(stateValue)qs.append('e[]',stateValue);
+        if(page>1)qs.set('pagina',String(page));
+        const {response,host,status}=await fetchSearch(pathname,qs);
+        if(!response){lastBlockedStatus=status||lastBlockedStatus;break;}
+        if(!response.ok)break;
+        anySuccess=true;
+        const rows=parsePage(await response.text(),host);
+        if(!rows.length)break;
+        let dated=0,old=0,added=0;
+        for(const job of rows){
+          const ms=dateMs(job.publishedAt);
+          if(!ms)continue;
+          dated++;
+          if(ms<cutoff){old++;continue;}
+          if(!jobs.has(job.url))added++;
+          jobs.set(job.url,{...(jobs.get(job.url)||{}),...job,broadCollection:false});
+        }
+        if(jobs.size)saveFallback([...jobs.values()].slice(0,max));
+        if((dated&&old===dated)||added===0)break;
+        await new Promise(r=>setTimeout(r,180));
       }
-      if(jobs.size)saveFallback([...jobs.values()].slice(0,max));
-      if(dated&&old===dated)break;
-      await new Promise(r=>setTimeout(r,550));
     }
   }
+  await Promise.all(Array.from({length:Math.min(4,queryTerms.length||1)},()=>worker()));
 
   const result=[...jobs.values()].slice(0,max);
   if(result.length){

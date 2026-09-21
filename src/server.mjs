@@ -8,11 +8,11 @@ import { fileURLToPath } from 'url';
 import ExcelJS from 'exceljs';
 import { db, json, parseJson, candidateSummary } from './db.mjs';
 import { extractText, inferProfile, extractPreferredResumeFromZip } from './services/resume.mjs';
-import { searchJobs, buildSearchTerms } from './services/jobs.mjs';
-import { rankJobs } from './services/ranking.mjs';
+import { searchJobs, buildSearchTerms, dedupeJobs } from './services/jobs.mjs';
+import { rankJobs, reviewVerifiedJobsWithAI } from './services/ranking.mjs';
 import { classifyJobsForQueue } from './services/sendability.mjs';
 import { tailorResume, tailorResumesBatch } from './services/tailor.mjs';
-import { applyToJob, closeLoginSession, createJobContextCollector, createApplicationBrowser } from './apply/engine.mjs';
+import { applyToJob, closeLoginSession, createJobContextCollector, createApplicationBrowser, createApplicationContext } from './apply/engine.mjs';
 import { runtime } from './runtime.mjs';
 import { storage, ensureCandidateDirs, candidateDir } from './storage.mjs';
 import { registerMultiFileRoute } from './multifile.mjs';
@@ -175,7 +175,10 @@ app.patch('/api/resume/:id/profile',(req,res) => {
   if(row.candidate_id) db.prepare('UPDATE candidates SET name=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(profile.name||'Sem nome',row.candidate_id);
   res.json({ok:true,candidateId:row.candidate_id,profile:{...profile,rawText:undefined}});
 });
+let searchInFlight=false;
 app.post('/api/search', async (req,res) => {
+  if(searchInFlight) return res.status(409).json({error:'Uma busca já está em andamento. Aguarde a conclusão para iniciar outra.'});
+  searchInFlight=true;
   try {
     const {resumeId,filters={},preview=false} = req.body || {};
     const resume = getResume(Number(resumeId));
@@ -183,6 +186,11 @@ app.post('/api/search', async (req,res) => {
     const profile = {...parseJson(resume.profile_json,{}),candidateId:resume.candidate_id};
     const effectiveFilters={...filters,recencyDays:Math.max(1,Math.min(60,Number(filters.recencyDays||15)))};
     const searchTerms=await buildSearchTerms(profile,effectiveFilters);
+    effectiveFilters.searchFocus=String(searchTerms.focus||'').trim();
+    effectiveFilters.searchCoreTerms=Array.isArray(searchTerms.core)?searchTerms.core:[];
+    effectiveFilters.searchAdjacentTerms=Array.isArray(searchTerms.adjacent)?searchTerms.adjacent:[];
+    effectiveFilters.searchTargetTerms=Array.isArray(searchTerms.targets)&&searchTerms.targets.length?searchTerms.targets:[...new Set([...effectiveFilters.searchCoreTerms,...effectiveFilters.searchAdjacentTerms])];
+    effectiveFilters.searchQueries=Array.isArray(searchTerms.queries)?searchTerms.queries:[...searchTerms];
     effectiveFilters.searchExclusions=Array.isArray(searchTerms.exclusions)?searchTerms.exclusions:[];
     const raw = await searchJobs(profile,effectiveFilters,searchTerms);
     const recent=recentJobs(raw,effectiveFilters.recencyDays).map(j=>addSearchEvidence(j,searchTerms));
@@ -196,18 +204,62 @@ app.post('/api/search', async (req,res) => {
     const cutoffIso=new Date(Date.now()-effectiveFilters.recencyDays*86400000).toISOString().slice(0,10);
     const poolRows=db.prepare('SELECT * FROM candidate_job_pool WHERE candidate_id=? AND published_at>=?').all(resume.candidate_id,cutoffIso);
     const poolMap=new Map(poolRows.map(x=>[x.fingerprint,x]));
-    const storedPool=poolRows.map(x=>({source:x.source,title:x.title,company:x.company,location:x.location,salary:x.salary,url:x.url,description:x.description,contractType:x.contract_type,publishedAt:x.published_at,loginFreeCandidate:x.sendable===1||x.source==='RioVagas',requiresLogin:['LOGIN_REQUIRED','EMAIL_REQUIRED'].includes(x.blocked_reason),broadCollection:/^(RioVagas|EmpregosRJ)$/i.test(x.source||'')}));
-    const candidatePool=[...new Map([...storedPool,...recent].map(j=>[jobFingerprint(j),addSearchEvidence(j,searchTerms)])).values()];
-    for(const j of candidatePool){const cached=poolMap.get(jobFingerprint(j));if(cached?.sendable===1)j.loginFreeCandidate=true;if(['LOGIN_REQUIRED','EMAIL_REQUIRED'].includes(cached?.blocked_reason))j.requiresLogin=true;}
+    const storedPool=poolRows.map(x=>({source:x.source,title:x.title,company:x.company,location:x.location,salary:x.salary,url:x.url,description:x.description,contractType:x.contract_type,publishedAt:x.published_at,loginFreeCandidate:x.source==='RioVagas',requiresLogin:['LOGIN_REQUIRED','EMAIL_REQUIRED'].includes(x.blocked_reason),broadCollection:/^(RioVagas|EmpregosRJ)$/i.test(x.source||'')}));
+    const candidatePool=dedupeJobs([...new Map([...storedPool,...recent].map(j=>[jobFingerprint(j),addSearchEvidence(j,searchTerms)])).values()]);
+    for(const j of candidatePool){const cached=poolMap.get(jobFingerprint(j));if(j.source==='RioVagas')j.loginFreeCandidate=true;if(['LOGIN_REQUIRED','EMAIL_REQUIRED'].includes(cached?.blocked_reason))j.requiresLogin=true;}
     const historyRows=db.prepare("SELECT fingerprint FROM candidate_job_history WHERE candidate_id=? AND status IN ('SENT','ALREADY_APPLIED')").all(resume.candidate_id);
     const seen=new Set(historyRows.map(x=>x.fingerprint));
     const unseen=candidatePool.filter(j=>!seen.has(jobFingerprint(j)));
     const ranked = rankJobs(unseen,profile,effectiveFilters);
+    const sourceQueuePriority=j=>/^(RioVagas)$/i.test(String(j.source||''))?100:/riovagas\.com\.br/i.test(String(j.source||'')+' '+String(j.url||''))?90:0;
+    ranked.sort((a,b)=>sourceQueuePriority(b)-sourceQueuePriority(a)||(b.score||0)-(a.score||0));
     const batchSize=Math.min(500,Math.max(100,Number(effectiveFilters.limit||500)));
-    const prepared=await classifyJobsForQueue(ranked,{batchSize,probeLimit:Math.min(160,batchSize)});
-    for(const j of prepared)if(j.reason==='UNVERIFIED_LOGIN'){j.sendable=1;j.reason='ACCESS_TO_VERIFY';j.verified=false;}
+    const desiredReady=Math.min(ranked.length,Math.max(batchSize,Math.ceil(batchSize*1.15)));
+    const verificationChunk=Math.max(80,Math.min(180,Math.ceil(batchSize*0.55)));
+    const preparedRaw=[];
+    let approvedCount=0,verificationOffset=0;
+    while(verificationOffset<ranked.length&&approvedCount<desiredReady){
+      const rankedChunk=ranked.slice(verificationOffset,verificationOffset+verificationChunk);
+      verificationOffset+=rankedChunk.length;
+      const checked=await classifyJobsForQueue(rankedChunk,{batchSize:rankedChunk.length,probeLimit:rankedChunk.length});
+      for(const j of checked)if(j.detailText)j.description=[j.description||'',j.detailText].filter(Boolean).join('\n\n').slice(0,50000);
+      const browserCandidates=checked.filter(j=>j.sendable===1&&!j.httpReady).map((j,i)=>({...j,id:-(verificationOffset*1000+i+1),_original:j}));
+      if(browserCandidates.length){
+        const browserCheck=createJobContextCollector(browserCandidates,{concurrency:Math.max(3,Math.min(8,Number(process.env.SEARCH_VERIFY_WORKERS||6)))});
+        for(const probe of browserCandidates){
+          const ctx=await browserCheck.get(probe.id);
+          const original=probe._original;
+          if(ctx?.blocked){
+            original.sendable=0;
+            original.reason=/login necess[aá]rio/i.test(ctx.blocked)?'LOGIN_REQUIRED':'BLOCKED';
+            original.verified=true;
+          }else if(!ctx?.ready){
+            original.sendable=0;
+            original.reason='NO_APPLICATION_FORM';
+            original.verified=true;
+          }else{
+            original.sendable=1;
+            original.reason='';
+            original.verified=true;
+            original.surfaceVerified=true;
+            if(ctx?.url)original.url=ctx.url;
+            if(ctx?.text)original.description=[original.description||'',ctx.text].filter(Boolean).join('\n\n').slice(0,50000);
+          }
+        }
+        await browserCheck.done.catch(()=>{});
+      }
+      const reviewed=await reviewVerifiedJobsWithAI(checked,profile,effectiveFilters,{maxJobs:rankedChunk.length,batchSize:55});
+      preparedRaw.push(...reviewed);
+      approvedCount=preparedRaw.reduce((n,j)=>n+(j.sendable===1?1:0),0);
+    }
+    const prepared=[]; const preparedUrls=new Set();
+    for(const j of preparedRaw){
+      const key=canonicalUrl(j.url)||jobFingerprint(j);
+      if(preparedUrls.has(key))continue;
+      preparedUrls.add(key);prepared.push(j);
+    }
     const poolClassified=db.prepare("UPDATE candidate_job_pool SET score=?,sendable=?,blocked_reason=?,last_seen_at=CURRENT_TIMESTAMP WHERE candidate_id=? AND fingerprint=?");
-    for(const j of prepared) poolClassified.run(j.score||0,j.reason==='ACCESS_TO_VERIFY'?0:(j.sendable?1:0),j.reason||'',resume.candidate_id,jobFingerprint(j));
+    for(const j of prepared) poolClassified.run(j.score||0,j.sendable?1:0,j.reason||'',resume.candidate_id,jobFingerprint(j));
     prepared.forEach((j,index)=>{j._rank=index+1;});
     let sendableIndex=0;
     for(const j of prepared) if(j.sendable){sendableIndex++;j._batch=Math.floor((sendableIndex-1)/batchSize)+1;j._selected=j._batch===1?1:0;} else {j._batch=0;j._selected=0;}
@@ -236,6 +288,7 @@ app.post('/api/search', async (req,res) => {
     const countBySource=rows=>Object.fromEntries(Object.entries(rows.reduce((acc,j)=>{const k=j.source||'Outra';acc[k]=(acc[k]||0)+1;return acc;},{})).sort((a,b)=>b[1]-a[1]));
     res.json({runId,preview:Boolean(preview),found:raw.length,recent:recent.length,staleSkipped:raw.length-recent.length,previouslySeenSkipped:Math.max(0,candidatePool.length-unseen.length),poolTotal:candidatePool.length,compatible:selected.length,compatibleTotal:prepared.length,sendableTotal:sendable.length,reserve:Math.max(0,sendable.length-selected.length),blockedLogin:blocked.length,blockedEmail:blockedEmail.length,unverifiedLogin:unverified.length,batches:Math.max(1,Math.ceil(sendable.length/batchSize)),sourceCounts:countBySource(candidatePool),freshSourceCounts:countBySource(raw),compatibleSourceCounts:countBySource(selected),sendableSourceCounts:countBySource(sendable),blockedSourceCounts:countBySource(blocked),unverifiedSourceCounts:countBySource(unverified),jobs:selected});
   } catch(e) { res.status(500).json({error:String(e.message||e)}); }
+  finally { searchInFlight=false; }
 });
 
 app.get('/api/run/:id/jobs',(req,res)=>res.json(getJobs(Number(req.params.id))));
@@ -248,12 +301,12 @@ async function processRun(runId,onlyErrors=false) {
   const dryRun=!prefs.autoSubmit;
   let jobs=getJobs(runId);
   if(onlyErrors){
-    const ids=new Set(db.prepare("SELECT job_id FROM applications WHERE run_id=? AND status IN ('ERROR','NEEDS_DATA','PREPARING','READY')").all(runId).map(x=>x.job_id));
+    const ids=new Set(db.prepare("SELECT job_id FROM applications WHERE run_id=? AND status IN ('ERROR','ERROR','PREPARING','READY')").all(runId).map(x=>x.job_id));
     jobs=jobs.filter(x=>ids.has(x.id));
   }
   db.prepare('UPDATE runs SET status=? WHERE id=?').run(onlyErrors?'RETRYING':'APPLYING',runId);
 
-  const collector=createJobContextCollector(jobs,{concurrency:Math.max(4,Math.min(20,Number(process.env.PREFLIGHT_WORKERS||12)))});
+  const collector=createJobContextCollector(jobs,{concurrency:Math.max(3,Math.min(10,Number(process.env.PREFLIGHT_WORKERS||8)))});
   collector.done.catch(()=>{});
   const ready=[];
   const waiters=[];
@@ -288,24 +341,39 @@ async function processRun(runId,onlyErrors=false) {
     let cursor=0;
     try{
       while(cursor<jobs.length){
-        const batch=[];
+        const batch=[], existingFiles=new Map();
         while(cursor<jobs.length&&batch.length<BATCH_SIZE){
           const job=jobs[cursor++];
           const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
           if(['SENT','ALREADY_APPLIED'].includes(old?.status))continue;
-          if(old?.tailored_file&&fs.existsSync(old.tailored_file)){push({job,file:old.tailored_file});continue;}
-          saveApplication(job,'PREPARING','','');batch.push(job);
+          if(old?.tailored_file&&fs.existsSync(old.tailored_file))existingFiles.set(job.id,old.tailored_file);
+          batch.push(job);
         }
         if(!batch.length)continue;
         const contexts=await Promise.all(batch.map(async job=>({job,ctx:await collector.get(job.id)})));
         const enriched=[];
         for(const {job,ctx} of contexts){
           if(ctx?.blocked){
-            const status=/login necess[aá]rio/i.test(ctx.blocked)?'SKIPPED_LOGIN':'NEEDS_DATA';
-            saveApplication(job,status,'',ctx.blocked);
-            if(status==='SKIPPED_LOGIN')db.prepare("UPDATE jobs SET sendable=0,blocked_reason='LOGIN_REQUIRED',selected=0,batch_no=0 WHERE id=?").run(job.id);
-            updateHistory(job,status);continue;
+            const isLogin=/login necess[aá]rio/i.test(ctx.blocked);
+            db.prepare("UPDATE jobs SET sendable=0,blocked_reason=?,selected=0,batch_no=0 WHERE id=?").run(isLogin?'LOGIN_REQUIRED':'BLOCKED',job.id);
+            db.prepare('DELETE FROM applications WHERE run_id=? AND job_id=?').run(runId,job.id);
+            updateHistory(job,isLogin?'BLOCKED_LOGIN':'BLOCKED');
+            continue;
           }
+          if(!ctx?.ready){
+            db.prepare("UPDATE jobs SET sendable=0,blocked_reason='NO_APPLICATION_FORM',selected=0,batch_no=0 WHERE id=?").run(job.id);
+            db.prepare('DELETE FROM applications WHERE run_id=? AND job_id=?').run(runId,job.id);
+            updateHistory(job,'NO_APPLICATION_FORM');
+            continue;
+          }
+          const existing=existingFiles.get(job.id);
+          if(existing){
+            const readyJob={...job,url:ctx?.url||job.url};
+            saveApplication(job,'READY',existing,'');
+            push({job:readyJob,file:existing});
+            continue;
+          }
+          saveApplication(job,'PREPARING','','');
           enriched.push({...job,url:ctx?.url||job.url,description:[job.description||'',ctx?.text||''].filter(Boolean).join('\n\n').slice(0,50000)});
         }
         if(!enriched.length)continue;
@@ -327,16 +395,34 @@ async function processRun(runId,onlyErrors=false) {
     }finally{producerDone=true;wake();await collector.done.catch(()=>{});}
   }
 
+  const domainState=new Map();
+  const domainKey=job=>{try{return new URL(job.url).hostname.replace(/^www\./,'').toLowerCase();}catch{return String(job.source||'other').toLowerCase();}};
+  const domainLimit=job=>{const k=domainKey(job);if(/riovagas\.com\.br/.test(k))return 2;if(/gupy\.io|linkedin\.com|indeed\.|catho\.|glassdoor\./.test(k))return 1;return 2;};
+  async function acquireDomain(job){
+    const key=domainKey(job),limit=domainLimit(job);let state=domainState.get(key);
+    if(!state){state={active:0,wait:[]};domainState.set(key,state);}
+    if(state.active>=limit)await new Promise(resolve=>state.wait.push(resolve));
+    state.active++;
+    return ()=>{state.active=Math.max(0,state.active-1);const next=state.wait.shift();if(next)next();};
+  }
+
   let applicationBrowser=null;
   async function applyWorker(){
-    while(true){
+    const workerContext=await createApplicationContext(applicationBrowser);
+    try{while(true){
       const item=await pop();
       if(!item) return;
       const {job,file}=item;
       const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
       if(['SENT','ALREADY_APPLIED'].includes(old?.status)) continue;
+      let releaseDomain=null;
       try{
-        const result=await applyToJob(job,file,profile,prefs,{dryRun,browser:applicationBrowser});
+        releaseDomain=await acquireDomain(job);
+        let result=await applyToJob(job,file,profile,prefs,{dryRun,browser:applicationBrowser,context:workerContext});
+        if(result.status==='ERROR'&&/timeout|ERR_(?:CONNECTION|NAME|TIMED)|navigation|target closed/i.test(String(result.error||''))&&!/sem confirma[cç][aã]o|submit|enviado/i.test(String(result.error||''))){
+          await new Promise(r=>setTimeout(r,500));
+          result=await applyToJob(job,file,profile,prefs,{dryRun,browser:applicationBrowser,context:workerContext});
+        }
         saveApplication(job,result.status,file,result.error||'');
         if(result.status==='SKIPPED_LOGIN') db.prepare("UPDATE jobs SET sendable=0,blocked_reason='LOGIN_REQUIRED',selected=0,batch_no=0 WHERE id=?").run(job.id);
         updateHistory(job,result.status);
@@ -344,11 +430,11 @@ async function processRun(runId,onlyErrors=false) {
         const message=String(e?.message||e).slice(0,500);
         saveApplication(job,'ERROR',file,message);
         updateHistory(job,'ERROR');
-      }
-    }
+      }finally{if(releaseDomain)releaseDomain();}
+    }}finally{await workerContext.close().catch(()=>{});}
   }
 
-  const workerCount=Math.max(2,Math.min(14,Number(process.env.APPLY_WORKERS||(dryRun?12:10))));
+  const workerCount=Math.max(3,Math.min(10,Number(process.env.APPLY_WORKERS||8)));
   applicationBrowser=await createApplicationBrowser();
   try{
     const workers=Array.from({length:workerCount},()=>applyWorker());
@@ -391,7 +477,7 @@ app.post('/api/run/:id/batch/:batch',(req,res)=>{
 app.get('/api/run/:id/status',(req,res)=>{
   const id=Number(req.params.id); const run=getRun(id);
   if(!run) return res.status(404).json({error:'Execução não encontrada'});
-  const counts=db.prepare('SELECT status,COUNT(*) count FROM applications WHERE run_id=? GROUP BY status').all(id);
+  const counts=db.prepare('SELECT a.status,COUNT(*) count FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.run_id=? AND j.selected=1 GROUP BY a.status').all(id);
   const total=db.prepare('SELECT COUNT(*) count FROM jobs WHERE run_id=? AND selected=1 AND sendable=1').get(id).count;
   const pool=db.prepare(`SELECT COUNT(*) poolTotal,COALESCE(SUM(sendable),0) sendableTotal,
     COALESCE(SUM(CASE WHEN blocked_reason IN ('LOGIN_REQUIRED','EMAIL_REQUIRED') THEN 1 ELSE 0 END),0) blockedLogin,

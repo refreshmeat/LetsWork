@@ -1,14 +1,17 @@
-﻿const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { pathToFileURL } = require('url');
 const { spawn, spawnSync } = require('child_process');
+const { pathToFileURL } = require('url');
 const { chromium } = require('playwright-core');
 
 const PORT = Number(process.env.PORT || 4317);
 let mainWindow = null;
 let logFile = null;
 let chatgptProcess = null;
+let serverProcess = null;
+let chatgptWatchdog = null;
+let chatgptEnsureInFlight = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 function log(msg){
@@ -42,6 +45,12 @@ function getPlaywrightChromium(){
   }
   return null;
 }
+function cleanupPlaywrightOrphans(){
+  try{
+    const ps="$ps=Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | Where-Object {$_.ExecutablePath -like '*ms-playwright*' -and $_.CommandLine -like '*playwright_chromiumdev_profile-*'}; foreach($p in $ps){Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue}";
+    spawnSync('powershell.exe',['-NoProfile','-WindowStyle','Hidden','-Command',ps],{windowsHide:true,stdio:'ignore'});
+  }catch{}
+}
 function unpackedScript(name){
   return app.isPackaged
     ? path.join(process.resourcesPath,'app.asar.unpacked','scripts',name)
@@ -59,7 +68,7 @@ async function cloakChatGPTWindow(profile){
 }
 
 async function ensureChatGPTBrowser(dataRoot){
-  process.env.CHATGPT_CDP_URL='http://127.0.0.1:9223';
+  process.env.CHATGPT_CDP_URL='http://127.0.0.1:9333';
   process.env.CHATGPT_WEB_MODEL='GPT-5.6 Sol';
   process.env.CHATGPT_WEB_LEVEL='high';
   const profile=path.join(dataRoot,'chatgpt-web-provider-profile');
@@ -72,7 +81,7 @@ async function ensureChatGPTBrowser(dataRoot){
   if(!exe) throw new Error('Chromium do Playwright não encontrado para abrir o ChatGPT.');
   try{fs.rmSync(path.join(profile,'lockfile'),{force:true});}catch{}
   chatgptProcess=spawn(exe,[
-    '--remote-debugging-port=9223',
+    '--remote-debugging-port=9333',
     `--user-data-dir=${profile}`,
     '--no-first-run',
     '--disable-background-timer-throttling',
@@ -88,9 +97,45 @@ async function ensureChatGPTBrowser(dataRoot){
   log('Sessão ChatGPT iniciada invisível');
   return true;
 }
-async function waitForServer(){
-  const ok=await waitUrl(`http://127.0.0.1:${PORT}/api/ai/status`,100);
+async function ensureChatGPTBrowserSafe(dataRoot){
+  if(chatgptEnsureInFlight) return chatgptEnsureInFlight;
+  chatgptEnsureInFlight=ensureChatGPTBrowser(dataRoot).finally(()=>{chatgptEnsureInFlight=null;});
+  return chatgptEnsureInFlight;
+}
+function startChatGPTWatchdog(dataRoot){
+  if(chatgptWatchdog) return;
+  chatgptWatchdog=setInterval(async()=>{
+    const ok=await waitUrl('http://127.0.0.1:9333/json/version',2);
+    if(ok) return;
+    log('Provedor ChatGPT offline; reiniciando em segundo plano');
+    try{await ensureChatGPTBrowserSafe(dataRoot);}
+    catch(err){log('Falha ao reiniciar provedor ChatGPT: '+String(err?.message||err));}
+  },5000);
+  if(typeof chatgptWatchdog.unref==='function')chatgptWatchdog.unref();
+}
+
+async function ensureServer(){
+  const statusUrl=`http://127.0.0.1:${PORT}/api/ai/status`;
+  if(await waitUrl(statusUrl,4)){
+    log('Servidor local já disponível');
+    return true;
+  }
+  const serverPath=path.join(__dirname,'..','src','server.mjs');
+  await import(pathToFileURL(serverPath).href);
+  const ok=await waitUrl(statusUrl,120);
   if(!ok) throw new Error('O servidor local do LetsWork não iniciou.');
+  log('Servidor local iniciado no processo principal');
+  return true;
+}
+function stopServerProcesses(){
+  try{
+    if(serverProcess?.pid){
+      spawnSync('taskkill',['/PID',String(serverProcess.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'});
+      serverProcess=null;
+    }
+    const ps="$needle='LetsWork\\app\\src\\server.mjs'; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like ('*'+$needle+'*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
+    spawnSync('powershell.exe',['-NoProfile','-WindowStyle','Hidden','-Command',ps],{windowsHide:true,stdio:'ignore'});
+  }catch{}
 }
 
 async function createWindow(){
@@ -100,11 +145,11 @@ async function createWindow(){
   process.env.LETSWORK_DATA_ROOT=dataRoot;
   process.env.PORT=String(PORT);
   log('iniciando LetsWork em '+__dirname);
+  cleanupPlaywrightOrphans();
 
-  await ensureChatGPTBrowser(dataRoot);
-  const serverPath=path.join(__dirname,'..','src','server.mjs');
-  await import(pathToFileURL(serverPath).href);
-  await waitForServer();
+  await ensureChatGPTBrowserSafe(dataRoot);
+  startChatGPTWatchdog(dataRoot);
+  await ensureServer();
 
   mainWindow=new BrowserWindow({
     width:1320,height:860,minWidth:1040,minHeight:680,
@@ -143,6 +188,9 @@ app.on('activate',()=>{
 });
 
 app.on('before-quit',()=>{
+  if(chatgptWatchdog){clearInterval(chatgptWatchdog);chatgptWatchdog=null;}
+  stopServerProcesses();
+  cleanupPlaywrightOrphans();
   const profile=path.join(app.getPath('home'),'LetsWork','dados','chatgpt-web-provider-profile');
   const script=unpackedScript('stop-chatgpt-browser.ps1');
   if(fs.existsSync(script)){

@@ -13,10 +13,10 @@ export async function searchAdzuna(terms,filters,max=150) {
   if (!appId || !key) return [];
   const out=[];
   const where=filters.nationwide?'Brasil':[filters.city,filters.state].filter(Boolean).join(', ');
-  const deadline=Date.now()+30000;
-  for (const term of terms.slice(0,12)) {
+  const deadline=Date.now()+60000;
+  for (const term of [...new Set(terms)].slice(0,60)) {
     if (out.length>=max || Date.now()>=deadline) break;
-    for (let page=1;page<=3 && out.length<max;page++) {
+    for (let page=1;page<=10 && out.length<max && Date.now()<deadline;page++) {
       const qs=new URLSearchParams({app_id:appId,app_key:key,results_per_page:'50',what:term,where,'content-type':'application/json'});
       try {
         const r=await fetch(`https://api.adzuna.com/v1/api/jobs/br/search/${page}?${qs}`,{signal:AbortSignal.timeout(7000)});
