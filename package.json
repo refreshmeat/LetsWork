@@ -1,15 +1,18 @@
 {
   "name": "letswork",
   "version": "0.1.0",
-  "description": "LetsWork - busca, adaptação e automação local de candidaturas",
+  "description": "LetsWork - busca, triagem e automação local de candidaturas",
   "type": "module",
   "main": "desktop/main.cjs",
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "check": "node --check src/server.mjs && node --check src/services/ai.mjs && node --check src/apply/engine.mjs && node --check src/services/jobs.mjs && node --check src/services/ranking.mjs && node --check src/services/tailor.mjs && node --check src/sources/linkedin.mjs && node --check src/sources/vagascom.mjs && node --check src/sources/gupy.mjs && node --check src/sources/directsites.mjs && node --check src/sources/webjobs.mjs && node --check src/sources/jobboards.mjs && node --check public/app.js && node --check desktop/main.cjs",
+    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/services/ai.mjs && node --check src/services/jobs.mjs && node --check src/services/inventory.mjs && node --check src/services/backup.mjs && node --check src/services/ranking.mjs && node --check src/services/tailor.mjs && node --check src/apply/engine.mjs && node --check src/apply/rio.mjs && node --check public/app.js && node --check desktop/main.cjs",
     "server": "node src/server.mjs",
-    "dist": "electron-builder --win nsis portable"
+    "dist": "electron-builder --win nsis portable",
+    "smoke": "node scripts/smoke.mjs",
+    "regression": "node scripts/regression.mjs",
+    "regression:live": "node scripts/regression-live.mjs"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.9",
@@ -21,7 +24,6 @@
     "multer": "^2.4.0",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.3.289",
-    "playwright-core": "^1.63.0",
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
@@ -39,6 +41,7 @@
       "desktop/**/*",
       "public/**/*",
       "src/**/*",
+      "!src/sources/**/*",
       "scripts/**/*",
       "package.json",
       ".env.example"

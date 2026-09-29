@@ -7,6 +7,14 @@ let candidates=[];
 let pollTimer=null;
 let selectedFiles=[];
 let searchElapsedTimer=null;
+let searchReviewTimer=null;
+let pendingQuestions=[];
+let selectedJobIds=new Set();
+let manuallyDeselectedJobIds=new Set();
+let selectionSaveTimer=null;
+let currentStatuses=new Map();
+let uploadInFlight=false;
+let candidateSelectionSeq=0;
 
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -30,16 +38,49 @@ function activateTab(name){
   if(name==='reports') loadReports();
 }
 document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>activateTab(b.dataset.tab)));
+async function loadSystemStatus(){
+  try{
+    const r=await fetch('/api/system/status'),d=await r.json();
+    const inv=d.inventory||{},active=Number(inv.active||0),last=inv.last_sync_at?dateBR(inv.last_sync_at):'';
+    if($('inventoryLabel'))$('inventoryLabel').textContent=`RioVagas · ${active.toLocaleString('pt-BR')} vagas`;
+    if($('inventoryMeta'))$('inventoryMeta').textContent=`até 30 dias${last?` · atualizado ${last}`:''}`;
+  }catch{
+    if($('inventoryMeta'))$('inventoryMeta').textContent='Inventário local indisponível';
+  }
+}
+
 async function loadAI(){
   try{
     const r=await fetch('/api/ai/status'),d=await r.json();
-    $('aiDot').className=`dot ${d.online?'online':'offline'}`;
-    $('aiLabel').textContent=d.online?'ChatGPT conectado':'ChatGPT indisponível';
-    $('aiModel').textContent=d.online?`${d.model||'GPT-5.6 Sol'} · ${d.level||'high'}`:(d.model||'GPT-5.6 Sol');
+    const local=d.engine==='ollama'||d.provider==='ollama';
+    const ready=Boolean(d.online)&&(d.modelReady!==false);
+    $('aiDot').className=`dot ${ready?'online':'offline'}`;
+    if(local){
+      $('aiLabel').textContent=ready?'Llama local conectado':(d.online?'Preparando Llama local':'Llama local indisponível');
+      $('aiModel').textContent=`${d.model||'Llama'} • local`;
+    }else{
+      $('aiLabel').textContent=d.online?'Llama local conectado':'Llama local indisponível';
+      $('aiModel').textContent=d.online?`${d.model||'GPT'} • ${d.level||''}`:(d.model||'GPT');
+    }
   }catch{
-    $('aiDot').className='dot offline'; $('aiLabel').textContent='ChatGPT indisponível';
+    $('aiDot').className='dot offline'; $('aiLabel').textContent='IA local indisponível';
   }
 }
+
+$('backupImportBtn')?.addEventListener('click',()=>$('backupFile')?.click());
+$('backupFile')?.addEventListener('change',async()=>{
+  const file=$('backupFile').files?.[0];if(!file)return;
+  if(!window.confirm('Importar este backup? O LetsWork validará o arquivo e aplicará a restauração na próxima inicialização.')){$('backupFile').value='';return;}
+  const btn=$('backupImportBtn');btn.disabled=true;btn.textContent='Validando backup...';
+  try{
+    const fd=new FormData();fd.append('backup',file);
+    const r=await fetch('/api/backup/import',{method:'POST',body:fd});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(d.error||'Falha ao importar backup');
+    toast(`Backup validado: ${d.summary?.candidateCount||0} candidato(s). Feche e abra o LetsWork para restaurar.`);
+  }catch(e){toast('Erro no backup: '+(e.message||e));}
+  finally{btn.disabled=false;btn.textContent='Importar backup';$('backupFile').value='';}
+});
 
 function renderCandidates(){
   $('candidateList').innerHTML=candidates.length?candidates.map(c=>`
@@ -67,9 +108,9 @@ function renderSelectedFiles(){
   if(likely>=0) $('primaryFileSelect').value=String(likely);
 }
 function showNewCandidate(openPicker=false){
-  candidateId=resumeId=runId=null; currentCandidate=null; currentJobs=[]; selectedFiles=[];
-  $('nationwide').checked=false; $('state').value='RJ'; $('city').value='Rio de Janeiro'; $('locationScope').value='state_priority'; $('area').value='';
-  $('workMode').value='include_remote'; $('pcdMode').value='exclude'; $('experienceLevel').value='entry'; $('recencyDays').value='15'; $('limit').value='500';
+  candidateId=resumeId=runId=null; currentCandidate=null; currentJobs=[]; selectedFiles=[]; if(searchReviewTimer){clearInterval(searchReviewTimer);searchReviewTimer=null;}
+  $('state').value='RJ'; $('city').value='Rio de Janeiro'; $('locationScope').value='state_priority'; $('area').value='';
+  $('workMode').value='include_remote'; $('pcdMode').value='exclude'; $('experienceLevel').value='entry'; $('recencyDays').value='15';
   for(const id of ['clt','pj','internship','temporary','apprentice','freelance']) $(id).checked=true;
   $('salaryExpectation').value='A combinar'; $('submitMode').value='dry'; $('availability').checked=false; $('salaryFromJob').checked=true; syncFilterInteractivity();
   $('resumeFile').value=''; renderSelectedFiles(); notice('uploadStatus','');
@@ -85,16 +126,37 @@ $('resumeFile').addEventListener('change',()=>{
   $('resumeFile').value=''; renderSelectedFiles();
 });
 $('uploadForm').addEventListener('submit',async e=>{
-  e.preventDefault(); const files=[...selectedFiles]; if(!files.length){notice('uploadStatus','Selecione pelo menos um arquivo para importar.');return;}
-  notice('uploadStatus','Lendo arquivos. OCR pode levar alguns instantes...');
-  const fd=new FormData(); files.forEach(file=>fd.append('files',file)); fd.append('primaryIndex',$('primaryFileSelect').value||'0');
+  e.preventDefault();
+  if(uploadInFlight)return;
+  const files=[...selectedFiles];
+  if(!files.length){notice('uploadStatus','Selecione pelo menos um arquivo para importar.');return;}
+  uploadInFlight=true;
+  const importBtn=$('importCandidateBtn');
+  if(importBtn){importBtn.disabled=true;importBtn.textContent='Importando...';}
+  $('resumeFile').disabled=true;
+  notice('uploadStatus','Lendo arquivos e montando o cadastro. OCR pode levar alguns instantes...');
+  const fd=new FormData();
+  files.forEach(file=>fd.append('files',file));
+  fd.append('primaryIndex',$('primaryFileSelect').value||'0');
   try{
     const r=await fetch('/api/candidate/import',{method:'POST',body:fd});
-    const d=await r.json(); if(!r.ok) throw new Error(d.error||'Falha ao importar currículo');
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(d.error||'Falha ao importar currículo');
     candidateId=d.candidateId; resumeId=d.resumeId;
-    await loadCandidates(); await selectCandidate(candidateId);
-    notice('uploadStatus',''); selectedFiles=[]; $('resumeFile').value=''; renderSelectedFiles();
-  }catch(err){notice('uploadStatus',`Erro: ${err.message}`);}
+    selectedFiles=[]; $('resumeFile').value=''; renderSelectedFiles();
+    await loadCandidates();
+    await selectCandidate(candidateId,{tab:'profile'});
+    if(d.deduplicated)toast('Esse mesmo cadastro já existia. A cópia duplicada foi ignorada.');
+    if(!currentCandidate?.resume?.base_resume_path){
+      $('optimizeBaseResume')?.click();
+    }
+  }catch(err){
+    notice('uploadStatus',`Erro: ${err.message||err}`);
+  }finally{
+    uploadInFlight=false;
+    $('resumeFile').disabled=false;
+    if(importBtn){importBtn.disabled=false;importBtn.textContent='Importar arquivos';}
+  }
 });
 
 function renderDocuments(documents=[]){
@@ -111,6 +173,19 @@ function renderDocuments(documents=[]){
   }));
 }
 
+function renderBaseResume(resume={}){
+  const focus=$('baseResumeFocus'),template=$('baseResumeTemplate'),link=$('baseResumeDownload');
+  if(focus)focus.value=resume?.base_resume_focus||$('area')?.value||'';
+  if(template)template.value=['executive','classic','compact'].includes(String(resume?.base_resume_template||''))?resume.base_resume_template:'executive';
+  if(link){
+    const ready=Boolean(resume?.base_resume_path);
+    link.classList.toggle('hidden',!ready);
+    link.href=ready&&resumeId?`/api/resume/${resumeId}/base-file`:'#';
+  }
+  if(resume?.base_resume_path){const label={executive:'Executivo',classic:'Clássico',compact:'Compacto'}[resume?.base_resume_template||'executive']||'Executivo';notice('baseResumeStatus',`Currículo-base pronto${resume.base_resume_focus?` para ${resume.base_resume_focus}`:''} · modelo ${label}. Os envios reutilizam este arquivo sem reescrever por vaga.`);}
+  else notice('baseResumeStatus','Ainda não há currículo-base otimizado. Até gerar um, os envios usarão o currículo original.');
+}
+
 function fillProfile(p={}){
   $('pName').value=p.name||''; $('pEmail').value=p.email||''; $('pPhone').value=p.phone||'';
   $('pLinkedin').value=p.linkedin||''; $('pPortfolio').value=p.portfolio||''; $('pInstagram').value=p.instagram||'';
@@ -119,45 +194,160 @@ function fillProfile(p={}){
   $('pAdditionalFacts').value=p.additionalFacts||'';
 }
 
-async function selectCandidate(id){
+async function loadPendingData(expectedCandidateId=candidateId,selectionSeq=candidateSelectionSeq){
+  const targetCandidateId=Number(expectedCandidateId);
+  const panel=$('pendingDataPanel'); if(!panel)return;
+  if(!targetCandidateId){panel.classList.add('hidden');return;}
+  const r=await fetch(`/api/candidate/${targetCandidateId}/pending-data`);
+  if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==targetCandidateId)return;
+  if(!r.ok){panel.classList.add('hidden');return;}
+  const d=await r.json();
+  if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==targetCandidateId)return;
+  pendingQuestions=Array.isArray(d.custom)?d.custom:[];
+  if(!d.total){panel.classList.add('hidden');$('pendingDataList').innerHTML='';return;}
+  panel.classList.remove('hidden');
+  const fieldIds={cpf:'pCpf',cep:'pCep',birthDate:'pBirthDate',address:'pAddress',neighborhood:'pNeighborhood',linkedin:'pLinkedin',instagram:'pInstagram',portfolio:'pPortfolio'};
+  const parts=[];
+  for(const f of Array.isArray(d.requiredFields)?d.requiredFields:[]){
+    const inputId=fieldIds[f.field]||'';
+    parts.push(`<div class="span-2"><strong>${esc(f.label)}</strong><div class="sub">Preencha o campo ${esc(f.label)} nos dados acima. Ele resolve ${f.jobs?.length||f.questions?.length||1} candidatura(s).${inputId?` Campo: ${esc(inputId.replace(/^p/,''))}.`:''}</div></div>`);
+  }
+  pendingQuestions.forEach((x,idx)=>{
+    parts.push(`<label class="span-2">${esc(x.question)}<input data-pending-index="${idx}" value="${esc(x.answer||'')}" placeholder="Resposta confirmada do candidato"></label>`);
+  });
+  if(!parts.length)parts.push('<div class="span-2"><strong>Dados já preenchidos</strong><div class="sub">As pendências existentes já têm dados suficientes. Use "Refazer erros e pendências" para continuar.</div></div>');
+  $('pendingDataList').innerHTML=parts.join('');
+  $('pendingDataMeta').textContent=`${d.total} candidatura(s) aguardando dado. ${d.readyToRetry||0} já podem ser retentadas com os dados atuais.`;
+}
+
+async function savePendingData(){
+  if(!candidateId)return;
+  const answers={};
+  document.querySelectorAll('[data-pending-index]').forEach(el=>{
+    const idx=Number(el.dataset.pendingIndex),q=pendingQuestions[idx]?.question,v=el.value.trim();
+    if(q&&v)answers[q]=v;
+  });
+  const fields={
+    cpf:$('pCpf').value.trim(),cep:$('pCep').value.trim(),birthDate:$('pBirthDate').value.trim(),
+    address:$('pAddress').value.trim(),neighborhood:$('pNeighborhood').value.trim(),
+    linkedin:$('pLinkedin').value.trim(),instagram:$('pInstagram').value.trim(),portfolio:$('pPortfolio').value.trim()
+  };
+  const r=await fetch(`/api/candidate/${candidateId}/pending-data`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({answers,fields})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){notice('pendingDataStatus',`Erro: ${d.error||'não foi possível salvar'}`);return;}
+  if(d.profile)fillProfile(d.profile);
+  notice('pendingDataStatus','Respostas pendentes salvas.');
+  await loadPendingData();
+}
+
+
+async function selectCandidate(id,options={}){
+  const selectionSeq=++candidateSelectionSeq;
+  const requestedCandidateId=Number(id);
+  if(searchReviewTimer){clearInterval(searchReviewTimer);searchReviewTimer=null;}
+  if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
+  runId=null; currentJobs=[]; currentStatuses=new Map(); selectedJobIds.clear(); manuallyDeselectedJobIds.clear();
+  $('resultsCard')?.classList.add('hidden');
   // Cada candidato começa com busca ampla por padrão; filtros restritivos de outro candidato não vazam para este perfil.
   $('locationScope').value='state_priority';
   $('experienceLevel').value='entry';
-  const r=await fetch(`/api/candidate/${id}`),d=await r.json();
+  const r=await fetch(`/api/candidate/${requestedCandidateId}`),d=await r.json();
+  if(selectionSeq!==candidateSelectionSeq)return;
   if(!r.ok) return toast(d.error||'Candidato não encontrado');
-  candidateId=id; currentCandidate=d; resumeId=d.resume?.id||null;
+  candidateId=requestedCandidateId; currentCandidate=d; resumeId=d.resume?.id||null;
   $('newCandidateView').classList.add('hidden'); $('candidateView').classList.remove('hidden');
   $('candidateActions').classList.remove('hidden'); $('pageTitle').textContent=d.candidate.name;
+  if($('deleteSearchHistory'))$('deleteSearchHistory').disabled=!(d.runs||[]).length;
   $('pageSubtitle').textContent=d.resume?.original_name?`Currículo: ${d.resume.original_name}`:'Cadastro local';
-  fillProfile(d.resume?.profile||{}); renderDocuments(d.documents||[]); activateTab('search'); syncFilterInteractivity();
-  renderCandidates(); await refreshCandidateStats(d);
+  fillProfile(d.resume?.profile||{}); renderBaseResume(d.resume||{}); renderDocuments(d.documents||[]);
+  await loadPendingData(requestedCandidateId,selectionSeq);
+  if(selectionSeq!==candidateSelectionSeq||candidateId!==requestedCandidateId)return;
+  activateTab(options.tab||'search'); syncFilterInteractivity();
+  renderCandidates(); await refreshCandidateStats(d,selectionSeq,requestedCandidateId);
 }
-async function refreshCandidateStats(detail=currentCandidate){
-  const summary=candidates.find(c=>c.id===candidateId)||{};
+async function refreshCandidateStats(detail=currentCandidate,selectionSeq=candidateSelectionSeq,expectedCandidateId=candidateId){
+  if(selectionSeq!==candidateSelectionSeq||Number(expectedCandidateId)!==Number(candidateId))return;
+  const summary=candidates.find(c=>c.id===expectedCandidateId)||{};
   $('statSent').textContent=summary.sent||0; $('statRuns').textContent=summary.runs||detail?.runs?.length||0;
   runId=summary.latestRunId||detail?.runs?.[0]?.id||null;
-  if(runId) await loadRun(runId);
+  if(runId) await loadRun(runId,expectedCandidateId,selectionSeq);
   else{
     currentJobs=[]; $('statJobs').textContent='0'; $('statStatus').textContent='Pronto';
     $('resultsCard').classList.add('hidden');
   }
 }
 
+function isAlreadySent(j){
+  return j?.alreadySent===true||String(j?.blocked_reason||j?.reason||'').toUpperCase()==='ALREADY_SENT';
+}
+function isJobSelectable(j){
+  return !isAlreadySent(j)&&Number(j?.sendable??1)!==0;
+}
+
 function statusBadge(status,error=''){
   const s=String(status||'').toUpperCase();
-  const cls=s==='SENT'?'sent':s==='ERROR'?'error':['SKIPPED_LOGIN','PREPARING'].includes(s)?'wait':'ready';
-  const label=s==='SENT'?'ENVIADA':s==='PREPARING'?'GERANDO CURRÍCULO':s==='READY'?'PRONTO PARA ENVIO':s==='SKIPPED_LOGIN'?'IGNORADA · LOGIN':s||'PENDENTE';
+  const cls=s==='SENT'?'sent':s==='ERROR'?'error':['SKIPPED_LOGIN','PREPARING','NEEDS_DATA','UNCERTAIN'].includes(s)?'wait':'ready';
+  const label=s==='SENT'?'ENVIADA':s==='PREPARING'?'PREPARANDO ENVIO':s==='READY'?'PRONTO PARA ENVIO':s==='SKIPPED_LOGIN'?'IGNORADA · LOGIN':s==='NEEDS_DATA'?'AGUARDANDO DADO':s==='UNCERTAIN'?'ENVIO INCERTO':s||'PENDENTE';
   return `<span class="status-badge ${cls}" title="${esc(error)}">${esc(label)}</span>`;
 }
 
-function renderJobs(jobs,statuses=new Map()){
+function syncSelectionUi(){
+  const selectableIds=new Set(currentJobs.filter(isJobSelectable).map(j=>Number(j.id)));
+  selectedJobIds=new Set([...selectedJobIds].filter(id=>selectableIds.has(Number(id))));
+  const total=selectableIds.size,selected=selectedJobIds.size;
+  const all=$('selectAllJobs');
+  if(all){
+    all.checked=total>0&&selected===total;
+    all.indeterminate=selected>0&&selected<total;
+    all.disabled=!total;
+  }
+  const sentCount=currentJobs.filter(isAlreadySent).length;
+  const meta=$('selectionMeta');
+  if(meta)meta.textContent=currentJobs.length?`${selected} de ${total} vagas novas selecionadas${sentCount?` · ${sentCount} já enviada(s)`:''}`:'';
+  if($('applyBtn'))$('applyBtn').disabled=selected===0;
+}
+async function saveJobSelection(){
+  if(!runId)return false;
+  const r=await fetch(`/api/run/${runId}/selection`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({selectedJobIds:[...selectedJobIds]})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){toast(d.error||'Não foi possível salvar a seleção.');return false;}
+  return true;
+}
+function scheduleJobSelectionSave(){
+  clearTimeout(selectionSaveTimer);
+  selectionSaveTimer=setTimeout(()=>{saveJobSelection().catch(()=>{});},120);
+}
+function bindJobSelection(){
+  document.querySelectorAll('.job-select').forEach(input=>input.addEventListener('change',()=>{
+    const id=Number(input.dataset.jobId);
+    if(input.checked){
+      selectedJobIds.add(id);
+      manuallyDeselectedJobIds.delete(id);
+    }else{
+      selectedJobIds.delete(id);
+      manuallyDeselectedJobIds.add(id);
+    }
+    syncSelectionUi();
+    input.closest('tr')?.classList.toggle('job-unselected',!input.checked);
+    scheduleJobSelectionSave();
+  }));
+}
+function renderJobs(jobs,statuses=currentStatuses){
+  currentStatuses=statuses instanceof Map?statuses:new Map();
   $('jobsBody').innerHTML=jobs.map(j=>{
-    const a=statuses.get(j.url)||{}; const pct=Math.round((j.score||0)*100);
-    return `<tr><td><strong>${esc(j.title)}</strong><span class="sub">${esc(j.company||j.source||'')}</span></td>
+    const a=currentStatuses.get(j.url)||{}; const pct=Math.round((j.score||0)*100);
+    const sent=isAlreadySent(j);
+    const checked=!sent&&selectedJobIds.has(Number(j.id))?'checked':'';
+    const selectCell=sent?'<span class="sent-check" title="Já enviada em busca anterior">✓</span>':`<input class="job-select" data-job-id="${Number(j.id)}" type="checkbox" ${checked} aria-label="Selecionar ${esc(j.title)}">`;
+    const rowClass=sent?'job-sent-history':(checked?'':'job-unselected');
+    const badge=sent?statusBadge('SENT','Enviada em busca anterior'):statusBadge(a.status,a.error);
+    return `<tr class="${rowClass}"><td class="select-col">${selectCell}</td>
+      <td><strong>${esc(j.title)}</strong><span class="sub">${esc(j.company||j.source||'')}${sent?' · já enviada':''}</span></td>
       <td>${esc(j.location||'')}</td><td>${esc(j.salary||'')}</td>
-      <td><span class="score-badge">${pct}%</span></td><td>${statusBadge(a.status,a.error)}</td>
+      <td><span class="score-badge">${pct}%</span></td><td>${badge}</td>
       <td><a class="link-out" href="${esc(j.url)}" target="_blank" rel="noreferrer">Abrir</a></td></tr>`;
   }).join('');
+  bindJobSelection();syncSelectionUi();
 }
 function renderBatchControl(status={}){
   const total=Math.max(0,Number(status.batches||0)),active=Math.max(1,Number(status.activeBatch||1));
@@ -167,39 +357,49 @@ function renderBatchControl(status={}){
   el.value=String(Math.min(active,total));el.classList.remove('hidden');
 }
 
-async function loadRun(id){
-  runId=id;
+async function loadRun(id,expectedCandidateId=candidateId,selectionSeq=candidateSelectionSeq){
+  const requestedRunId=Number(id);
+  const expectedId=Number(expectedCandidateId);
+  runId=requestedRunId;
   const [jr,ar,sr]=await Promise.all([fetch(`/api/run/${id}/jobs`),fetch(`/api/run/${id}/applications`),fetch(`/api/run/${id}/status`)]);
-  currentJobs=jr.ok?await jr.json():[]; const apps=ar.ok?await ar.json():[]; const status=sr.ok?await sr.json():{};
+  const jobsPayload=jr.ok?await jr.json():[];
+  const apps=ar.ok?await ar.json():[];
+  const status=sr.ok?await sr.json():{};
+  if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==expectedId||Number(status.candidateId)!==expectedId){
+    if(runId===requestedRunId)runId=null;
+    return;
+  }
+  currentJobs=jobsPayload;
+  selectedJobIds=new Set(currentJobs.filter(j=>Number(j.selected)!==0).map(j=>Number(j.id)));
+  manuallyDeselectedJobIds=new Set(currentJobs.filter(j=>isJobSelectable(j)&&Number(j.selected)===0).map(j=>Number(j.id)));
+  currentStatuses=new Map(apps.map(x=>[x.url,x]));
   $('statJobs').textContent=currentJobs.length; $('statStatus').textContent=status.status||'Pronto';
-  renderJobs(currentJobs,new Map(apps.map(x=>[x.url,x]))); renderBatchControl(status);
+  renderJobs(currentJobs,currentStatuses); renderBatchControl(status);
   $('resultsCard').classList.toggle('hidden',!currentJobs.length);
-  $('resultMeta').textContent=currentJobs.length?`Lote ${status.activeBatch||1}/${status.batches||1}: ${currentJobs.length} vagas para processar · ${status.sendableTotal||currentJobs.length} automatizáveis sem login · ${status.reserve||0} guardadas em outros lotes · ${status.blockedLogin||0} bloqueadas por login e fora da fila.`:'';
+  $('resultMeta').textContent=currentJobs.length?`Lote ${status.activeBatch||1}/${status.batches||1}: ${currentJobs.filter(isJobSelectable).length} novas para processar · ${status.alreadySentTotal||0} já enviadas · ${status.sendableTotal||currentJobs.filter(isJobSelectable).length} automatizáveis sem login · ${status.reserve||0} guardadas em outros lotes · ${status.blockedLogin||0} bloqueadas por login e fora da fila.`:'';
   $('xlsxBtn').href=`/api/run/${id}/export.xlsx`; $('csvBtn').href=`/api/run/${id}/export.csv`;
 }
 function filters(){
-  const nationwide=$('nationwide').checked;
-  const states=nationwide?[]:splitList($('state').value),cities=nationwide?[]:splitList($('city').value);
+  const nationwide=false;
+  const states=splitList($('state').value),cities=splitList($('city').value);
   const contractTypes=[];
   if($('clt').checked) contractTypes.push('CLT'); if($('pj').checked) contractTypes.push('PJ');
   if($('internship').checked) contractTypes.push('ESTAGIO'); if($('temporary').checked) contractTypes.push('TEMPORARIO');
   if($('apprentice').checked) contractTypes.push('APRENDIZ'); if($('freelance').checked) contractTypes.push('FREELANCE');
   const workMode=$('workMode').value;
   return {nationwide,state:states[0]||'',city:cities[0]||'',states,cities,locationScope:$('locationScope').value,area:$('area').value.trim(),workMode,
-    remote:workMode!=='onsite_only',pcdMode:$('pcdMode').value,experienceLevel:$('experienceLevel').value,recencyDays:Math.min(60,Math.max(1,Number($('recencyDays').value||15))),contractTypes,
-    limit:Math.min(500,Math.max(100,Number($('limit').value||500))),availability:$('availability').checked,
+    remote:workMode!=='onsite_only',pcdMode:$('pcdMode').value,experienceLevel:$('experienceLevel').value,recencyDays:[7,15,30].includes(Number($('recencyDays').value))?Number($('recencyDays').value):15,contractTypes,
+    availability:$('availability').checked,
     salaryExpectation:$('salaryExpectation').value.trim()||'A combinar',salaryFromJob:$('salaryFromJob').checked,
     autoSubmit:$('submitMode').value==='live'};
 }
 function syncFilterInteractivity(){
-  const nationwide=$('nationwide').checked;
   const locationIds=['state','city','locationScope'];
-  for(const id of locationIds){const el=$(id);if(el){el.disabled=nationwide;el.readOnly=false;el.style.pointerEvents='auto';}}
-  const alwaysEnabled=['nationwide','area','workMode','pcdMode','experienceLevel','recencyDays','limit','clt','pj','internship','temporary','apprentice','freelance','salaryExpectation','submitMode','availability','salaryFromJob','searchBtn'];
+  for(const id of locationIds){const el=$(id);if(el){el.disabled=false;el.readOnly=false;el.style.pointerEvents='auto';}}
+  const alwaysEnabled=['area','workMode','pcdMode','experienceLevel','recencyDays','clt','pj','internship','temporary','apprentice','freelance','salaryExpectation','submitMode','availability','salaryFromJob','searchBtn'];
   for(const id of alwaysEnabled){const el=$(id);if(el){el.disabled=false;el.readOnly=false;el.style.pointerEvents='auto';}}
   const panel=$('tab-search');if(panel)panel.style.pointerEvents='auto';
 }
-$('nationwide').addEventListener('change',syncFilterInteractivity);
 window.addEventListener('focus',syncFilterInteractivity);
 
 async function saveProfile(){
@@ -211,27 +411,100 @@ async function saveProfile(){
   const r=await fetch(`/api/resume/${resumeId}/profile`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   const d=await r.json(); if(!r.ok){notice('profileStatus',`Erro: ${d.error||'não foi possível salvar'}`);return false;}
   notice('profileStatus','Perfil salvo.'); $('pageTitle').textContent=body.name||'Sem nome';
-  await loadCandidates(); return true;
+  await loadCandidates(); await loadPendingData(); return true;
 }
 $('saveProfile').addEventListener('click',saveProfile);
+$('optimizeBaseResume')?.addEventListener('click',async()=>{
+  if(!resumeId)return;
+  const btn=$('optimizeBaseResume');
+  btn.disabled=true;
+  notice('baseResumeStatus','Otimizando currículo-base com a IA local. Isso acontece uma única vez para este currículo...');
+  if(currentCandidate?.resume?.original_name) $('pageSubtitle').textContent='Currículo: '+currentCandidate.resume.original_name+' · otimizando currículo-base...';
+  try{
+    await saveProfile();
+    const focus=String($('baseResumeFocus')?.value||$('area')?.value||'').trim();
+    const template=String($('baseResumeTemplate')?.value||'executive');
+    const r=await fetch(`/api/resume/${resumeId}/optimize-base`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({focus,template})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(d.error||'Falha ao otimizar currículo-base');
+    if(currentCandidate?.resume){
+      currentCandidate.resume.base_resume_path=d.file||'ready';
+      currentCandidate.resume.base_resume_focus=d.focus||focus;
+      currentCandidate.resume.base_resume_template=d.template||template;
+      currentCandidate.resume.base_resume_updated_at=d.updatedAt||new Date().toISOString();
+    }
+    renderBaseResume(currentCandidate?.resume||{base_resume_path:d.file,base_resume_focus:d.focus||focus});
+    if(currentCandidate?.resume?.original_name) $('pageSubtitle').textContent='Currículo: '+currentCandidate.resume.original_name+' · currículo-base pronto';
+    toast('Currículo-base otimizado e pronto para os envios.');
+  }catch(e){notice('baseResumeStatus','Erro ao gerar currículo-base: '+(e.message||e)+'. O currículo original continua preservado.'); if(currentCandidate?.resume?.original_name) $('pageSubtitle').textContent='Currículo: '+currentCandidate.resume.original_name+' · falha ao gerar currículo-base';}
+  finally{btn.disabled=false;}
+});
+$('savePendingData').addEventListener('click',savePendingData);
+async function pollSearchReview(targetRun){
+  if(!targetRun||runId!==targetRun)return false;
+  const [sr,jr]=await Promise.all([
+    fetch(`/api/run/${targetRun}/status`),
+    fetch(`/api/run/${targetRun}/jobs`)
+  ]);
+  if(!sr.ok||!jr.ok)return true;
+  const status=await sr.json(),jobs=await jr.json();
+  if(runId!==targetRun)return false;
+  const previousJobIds=new Set(currentJobs.map(j=>Number(j.id)));
+  currentJobs=jobs||[];
+  const nextSelected=new Set();
+  for(const j of currentJobs){
+    if(!isJobSelectable(j))continue;
+    const id=Number(j.id);
+    if(manuallyDeselectedJobIds.has(id))continue;
+    if(selectedJobIds.has(id)||(!previousJobIds.has(id)&&Number(j.selected)!==0))nextSelected.add(id);
+  }
+  selectedJobIds=nextSelected;
+  manuallyDeselectedJobIds=new Set([...manuallyDeselectedJobIds].filter(id=>currentJobs.some(j=>Number(j.id)===Number(id))));
+  $('statJobs').textContent=currentJobs.length;
+  renderJobs(currentJobs,currentStatuses);
+  renderBatchControl(status);
+  $('resultMeta').textContent=`Lote ${status.activeBatch||1}/${status.batches||1}: ${currentJobs.length} vagas prontas · ${status.aiReviewPending||0} em análise pela IA · ${status.reserve||0} em outros lotes · ${status.blockedLogin||0} bloqueadas por login.`;
+  if((status.aiReviewPending||0)>0){
+    $('statStatus').textContent='Analisando vagas';
+    notice('searchStatus',`${currentJobs.length} vagas já prontas. ${status.aiReviewPending} vagas ambíguas continuam em análise.`);
+    return true;
+  }
+  $('statStatus').textContent='Busca concluída';
+  notice('searchStatus',`${currentJobs.length} vagas prontas. Análise concluída.`);
+  return false;
+}
+function startSearchReviewPoll(targetRun){
+  if(searchReviewTimer)clearInterval(searchReviewTimer);
+  const tick=async()=>{
+    const keep=await pollSearchReview(targetRun).catch(()=>true);
+    if(!keep&&searchReviewTimer){clearInterval(searchReviewTimer);searchReviewTimer=null;}
+  };
+  tick();
+  searchReviewTimer=setInterval(tick,2500);
+}
+
 $('searchBtn').addEventListener('click',async()=>{
   if(!resumeId) return;
   $('searchBtn').disabled=true; $('statStatus').textContent='Buscando';
   const searchStarted=Date.now();
-  notice('searchStatus','Buscando em RioVagas, Vagas.com, LinkedIn, Gupy e demais fontes... 0s');
-  clearInterval(searchElapsedTimer); searchElapsedTimer=setInterval(()=>{const sec=Math.floor((Date.now()-searchStarted)/1000);notice('searchStatus',`Buscando em várias fontes... ${sec}s`);},1000);
+  notice('searchStatus','Buscando no RioVagas... 0s');
+  clearInterval(searchElapsedTimer); searchElapsedTimer=setInterval(()=>{const sec=Math.floor((Date.now()-searchStarted)/1000);notice('searchStatus',`Buscando no RioVagas... ${sec}s`);},1000);
   try{
     await saveProfile();
     const r=await fetch('/api/search',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({resumeId,filters:filters()})});
     const d=await r.json(); if(!r.ok) throw new Error(d.error||'Falha na busca');
-    runId=d.runId; currentJobs=d.jobs||[]; $('statJobs').textContent=currentJobs.length; $('statStatus').textContent='Busca concluída';
-    renderJobs(currentJobs); $('resultsCard').classList.remove('hidden');
+    runId=d.runId; currentJobs=d.jobs||[];
+    selectedJobIds=new Set(currentJobs.filter(isJobSelectable).map(j=>Number(j.id)));
+    manuallyDeselectedJobIds=new Set();
+    currentStatuses=new Map(); $('statJobs').textContent=currentJobs.length; $('statStatus').textContent='Busca concluída';
+    renderJobs(currentJobs,currentStatuses); $('resultsCard').classList.remove('hidden');
     const sourceNames=[...new Set([...Object.keys(d.sourceCounts||{}),...Object.keys(d.sendableSourceCounts||{}),...Object.keys(d.blockedSourceCounts||{})])];
     const sourceTriples=sourceNames.slice(0,12).map(k=>`${k}: ${d.sourceCounts?.[k]||0}/${d.sendableSourceCounts?.[k]||0}/${d.blockedSourceCounts?.[k]||0}`).join(' · ');
-    $('resultMeta').textContent=`${d.compatible} no lote 1 · ${d.sendableTotal||0} enviáveis sem login · ${d.reserve||0} guardadas para outros lotes · ${d.blockedLogin||0} bloqueadas por login · ${d.unverifiedLogin||0} aguardando verificação · ${d.compatibleTotal||0} compatíveis salvas · ${d.recent??d.found} recentes.${sourceTriples?` Por fonte (coletadas/enviáveis/bloqueadas): ${sourceTriples}.`:''}`;
+    $('resultMeta').textContent=`${d.compatible} novas no lote 1 · ${d.alreadySentTotal||0} já enviadas encontradas · ${d.sendableTotal||0} enviáveis sem login · ${d.reserve||0} guardadas para outros lotes · ${d.blockedLogin||0} bloqueadas por login · ${d.unverifiedLogin||0} aguardando verificação · ${d.compatibleTotal||0} compatíveis salvas · ${d.recent??d.found} recentes.${sourceTriples?` Por fonte (coletadas/enviáveis/bloqueadas): ${sourceTriples}.`:''}`;
     renderBatchControl({batches:d.batches||1,activeBatch:1});
     $('xlsxBtn').href=`/api/run/${runId}/export.xlsx`; $('csvBtn').href=`/api/run/${runId}/export.csv`;
-    notice('searchStatus',`${d.compatible} vagas prontas neste lote. ${d.reserve||0} ficaram guardadas para depois.`);
+    notice('searchStatus',d.aiReviewPending>0?`${d.compatible} vagas já prontas. ${d.aiReviewPending} vagas ambíguas continuam em análise.`:`${d.compatible} vagas prontas neste lote.`);
+    if((d.aiReviewPending||0)>0)startSearchReviewPoll(runId);
     setTimeout(()=>$('resultsCard').scrollIntoView({behavior:'smooth',block:'start'}),80);
     await loadCandidates(); renderCandidates();
   }catch(err){notice('searchStatus',`Erro: ${err.message}`);$('statStatus').textContent='Erro';}
@@ -241,7 +514,7 @@ $('searchBtn').addEventListener('click',async()=>{
 async function refreshApplications(){
   if(!runId) return;
   const r=await fetch(`/api/run/${runId}/applications`); if(!r.ok) return;
-  const rows=await r.json(); renderJobs(currentJobs,new Map(rows.map(x=>[x.url,x])));
+  const rows=await r.json(); currentStatuses=new Map(rows.map(x=>[x.url,x])); renderJobs(currentJobs,currentStatuses);
 }
 
 async function pollStatus(){
@@ -249,24 +522,46 @@ async function pollStatus(){
   const r=await fetch(`/api/run/${runId}/status`); if(!r.ok) return;
   const d=await r.json(),c=d.counts||{};
   $('statStatus').textContent=d.status||'Processando';
-  notice('applyStatus',`Enviadas: ${c.SENT||0} · Gerando currículo: ${c.PREPARING||0} · Prontas para envio: ${c.READY||0} · Erros: ${c.ERROR||0} · Ignoradas por login: ${c.SKIPPED_LOGIN||0}`);
+  notice('applyStatus',`Enviadas: ${c.SENT||0} · Preparando envio: ${c.PREPARING||0} · Prontas: ${c.READY||0} · Erros: ${c.ERROR||0} · Aguardando dados: ${c.NEEDS_DATA||0} · Incertas: ${c.UNCERTAIN||0} · Ignoradas por login: ${c.SKIPPED_LOGIN||0}`);
   if(d.status==='DONE'||d.status==='CANCELLED'||String(d.status).startsWith('ERROR')){
     clearInterval(pollTimer);pollTimer=null;$('applyBtn').disabled=false;$('retryBtn').disabled=false;
-    await refreshApplications();await loadCandidates();renderCandidates();
+    await refreshApplications();await loadCandidates();renderCandidates();await loadPendingData();
   }
 }
 async function startRun(endpoint){
   if(!runId) return;
+  if(endpoint==='apply'){
+    if(!selectedJobIds.size){toast('Selecione pelo menos uma vaga para processar.');return;}
+    if(!await saveJobSelection())return;
+  }
+  if(searchReviewTimer){clearInterval(searchReviewTimer);searchReviewTimer=null;}
+  let confirmLive=false;
   if(endpoint==='apply'&&$('submitMode').value==='live'){
     if(!window.confirm('Modo real: o LetsWork poderá enviar candidaturas de verdade. Continuar?')) return;
+    confirmLive=true;
+  }
+  if(endpoint==='retry'){
+    if(!window.confirm('Refazer erros e pendências deste lote? Em uma execução real isso pode enviar candidaturas de verdade. Envios incertos NÃO serão repetidos.')) return;
+    confirmLive=true;
   }
   $('applyBtn').disabled=true;$('retryBtn').disabled=true;$('statStatus').textContent='Processando';
-  const live=endpoint==='apply'&&$('submitMode').value==='live';
-  const r=await fetch(`/api/run/${runId}/${endpoint}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirmLive:live})}),d=await r.json();
+  const r=await fetch(`/api/run/${runId}/${endpoint}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirmLive,selectedJobIds:endpoint==='apply'?[...selectedJobIds]:undefined})}),d=await r.json();
   if(!r.ok){notice('applyStatus',`Erro: ${d.error||'falha'}`);$('applyBtn').disabled=false;$('retryBtn').disabled=false;return;}
   notice('applyStatus',endpoint==='retry'?'Retentativa iniciada.':'Processamento iniciado.');
   if(pollTimer) clearInterval(pollTimer);await pollStatus();pollTimer=setInterval(pollStatus,2500);
 }
+$('selectAllJobs').addEventListener('change',()=>{
+  const selectableIds=currentJobs.filter(isJobSelectable).map(j=>Number(j.id));
+  if($('selectAllJobs').checked){
+    selectedJobIds=new Set(selectableIds);
+    for(const id of selectableIds)manuallyDeselectedJobIds.delete(id);
+  }else{
+    selectedJobIds.clear();
+    for(const id of selectableIds)manuallyDeselectedJobIds.add(id);
+  }
+  renderJobs(currentJobs,currentStatuses);
+  scheduleJobSelectionSave();
+});
 $('batchSelect').addEventListener('change',async()=>{
   if(!runId) return;
   const batch=Number($('batchSelect').value||1);
@@ -287,6 +582,19 @@ async function loadReports(){
     '<div class="empty-list">Nenhuma planilha salva ainda. Você pode gerar a planilha atual acima.</div>';
 }
 
+$('deleteSearchHistory').addEventListener('click',async()=>{
+  if(!candidateId)return;
+  const summary=candidates.find(c=>c.id===candidateId)||{};
+  const sent=Number(summary.sent||0),runs=Number(summary.runs||currentCandidate?.runs?.length||0);
+  if(!runs){toast('Este candidato ainda não possui buscas para excluir.');return;}
+  const warning=`Excluir ${runs} busca(s) anterior(es) deste candidato? Isso apaga candidaturas registradas, relatórios e marcações de vaga ENVIADA, mas preserva o currículo e os dados pessoais.${sent?` Há ${sent} envio(s) registrado(s); depois da exclusão, essas vagas poderão aparecer como novas e ser processadas novamente.`:''}`;
+  if(!window.confirm(warning))return;
+  const r=await fetch(`/api/candidate/${candidateId}/search-history`,{method:'DELETE'}),d=await r.json().catch(()=>({}));
+  if(!r.ok)return toast(`Erro: ${d.error||'não foi possível excluir as buscas'}`);
+  runId=null;currentJobs=[];currentStatuses=new Map();selectedJobIds.clear();
+  toast(`Histórico de buscas excluído (${d.deletedRuns||0} busca(s)). Currículo preservado.`);
+  await loadCandidates();await selectCandidate(candidateId);
+});
 $('deleteCandidate').addEventListener('click',async()=>{
   if(!candidateId) return;
   const rr=await fetch(`/api/candidate/${candidateId}/reports`),reports=rr.ok?await rr.json():[];
@@ -306,7 +614,7 @@ $('latestReportBtn').addEventListener('click',e=>{
 });
 
 async function init(){
-  await loadAI();
+  await loadAI(); loadSystemStatus();
   await loadCandidates();
   if(candidates.length) await selectCandidate(candidates[0].id);
   else showNewCandidate();

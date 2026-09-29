@@ -236,12 +236,62 @@ async function indexedSearch(terms,filters,max=600){
   await Promise.all(Array.from({length:Math.min(3,queue.length||1)},()=>worker()));
   return uniq([...out.values()]).slice(0,max);
 }
+
+async function publicAtsIndexed(terms,filters,max=900){
+  const cutoff=new Date(Date.now()-Math.max(1,Math.min(60,Number(filters.recencyDays||15)))*86400000).toISOString().slice(0,10);
+  const domains=['job-boards.greenhouse.io','jobs.lever.co','jobs.smartrecruiters.com','apply.workable.com','teamtailor.com'];
+  const cleaned=[...new Set((terms||[]).map(x=>String(x||'').trim()).filter(x=>x.length>=3))].slice(0,16);
+  const groups=[];
+  for(let i=0;i<cleaned.length;i+=4)groups.push(cleaned.slice(i,i+4));
+  if(!groups.length)groups.push(['vaga']);
+  const city=String(filters.city||'').trim(),state=String(filters.state||'').trim();
+  const region=[city,state].filter(Boolean).join(' ');
+  const scopes=[];
+  if(region)scopes.push('"'+region+'"');
+  scopes.push('(Brasil OR Brazil) (remoto OR remote)');
+  const queries=[];
+  for(const domain of domains){
+    for(const scope of scopes){
+      for(const group of groups.slice(0,2)){
+        const roles='('+group.map(t=>'"'+t.replace(/"/g,'')+'"').join(' OR ')+')';
+        queries.push('site:'+domain+' '+roles+' '+scope);
+      }
+    }
+  }
+  const out=new Map(),deadline=Date.now()+38000;
+  let cursor=0;
+  async function worker(){
+    while(cursor<queries.length&&out.size<max&&Date.now()<deadline){
+      const q=queries[cursor++];
+      const [a,b]=await Promise.all([brave(q,25),duck(q,25)]);
+      for(const row of [...a,...b]){
+        if(!row.url||out.has(row.url))continue;
+        const source=sourceName(row.url);
+        if(!/^(Greenhouse|Lever|Workable|SmartRecruiters|Teamtailor)$/.test(source))continue;
+        out.set(row.url,{
+          source,title:row.title||'',company:'',salary:'',location:region||'Brasil',
+          url:row.url,description:row.snippet||'',contractType:'',publishedAt:cutoff,
+          indexedRecent:true,loginFreeCandidate:false,webDiscovered:true,publicAtsCandidate:true
+        });
+        if(out.size>=max)break;
+      }
+      await delay(80);
+    }
+  }
+  await Promise.all(Array.from({length:Math.min(5,queries.length||1)},()=>worker()));
+  const rows=uniq([...out.values()]).slice(0,max);
+  const by=rows.reduce((a,j)=>(a[j.source]=(a[j.source]||0)+1,a),{});
+  console.log('[Web] ATS publicos: '+rows.length+' '+JSON.stringify(by));
+  return rows;
+}
+
 export async function searchWebJobs(terms,filters,max=1800){
+  if(filters?.publicAtsOnly===true)return publicAtsIndexed(terms,filters,Math.min(1000,max));
   const [direct,indexed]=await Promise.all([
     directPortals(terms,filters,max),
     indexedSearch(terms,filters,Math.min(600,max))
   ]);
   const rows=uniq([...direct,...indexed]).slice(0,max);
-  console.log('[Web] total: '+rows.length+' vagas/anúncios candidatos');
+  console.log('[Web] total: '+rows.length+' vagas/anuncios candidatos');
   return rows;
 }

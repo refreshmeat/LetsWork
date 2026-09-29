@@ -8,11 +8,13 @@ import { fileURLToPath } from 'url';
 import ExcelJS from 'exceljs';
 import { db, json, parseJson, candidateSummary } from './db.mjs';
 import { extractText, inferProfile, extractPreferredResumeFromZip } from './services/resume.mjs';
-import { searchJobs, buildSearchTerms, dedupeJobs } from './services/jobs.mjs';
-import { rankJobs, reviewVerifiedJobsWithAI } from './services/ranking.mjs';
+import { searchJobs, buildSearchTerms, dedupeJobs, maintainRioVagasInventory, getRioVagasInventoryStatus } from './services/jobs.mjs';
+import { prefilterJobsForAI, reviewVerifiedJobsWithAI, jobNeedsAIReview } from './services/ranking.mjs';
 import { classifyJobsForQueue } from './services/sendability.mjs';
-import { tailorResume, tailorResumesBatch } from './services/tailor.mjs';
-import { applyToJob, closeLoginSession, createJobContextCollector, createApplicationBrowser, createApplicationContext } from './apply/engine.mjs';
+import { optimizeBaseResume } from './services/tailor.mjs';
+import { terminalInventoryIds, upsertCandidateMatch, updateCandidateMatchStatus, recordRunEvent, runMetrics, sourceRegistry } from './services/inventory.mjs';
+import { createPortableBackup, preparePortableRestore } from './services/backup.mjs';
+import { applyRioVagasDirect } from './apply/rio.mjs';
 import { runtime } from './runtime.mjs';
 import { storage, ensureCandidateDirs, candidateDir } from './storage.mjs';
 import { registerMultiFileRoute } from './multifile.mjs';
@@ -41,6 +43,13 @@ registerMultiFileRoute(app,upload);
 const getResume = id => db.prepare('SELECT * FROM resumes WHERE id=?').get(id);
 const getRun = id => db.prepare('SELECT * FROM runs WHERE id=?').get(id);
 const getJobs = id => db.prepare('SELECT * FROM jobs WHERE run_id=? AND selected=1 AND sendable=1 ORDER BY score DESC').all(id);
+const getBatchJobs = id => {
+  const run=getRun(id); if(!run)return [];
+  const batch=Math.max(1,Number(run.active_batch||1));
+  if(batch===1)return db.prepare(`SELECT * FROM jobs WHERE run_id=? AND ((sendable=1 AND batch_no=?) OR blocked_reason='ALREADY_SENT')
+    ORDER BY CASE WHEN blocked_reason='ALREADY_SENT' THEN 1 ELSE 0 END,score DESC`).all(id,batch);
+  return db.prepare('SELECT * FROM jobs WHERE run_id=? AND sendable=1 AND batch_no=? ORDER BY score DESC').all(id,batch);
+};
 const getAllJobs = id => db.prepare('SELECT * FROM jobs WHERE run_id=? ORDER BY score DESC').all(id);
 const getCandidate=id=>db.prepare('SELECT * FROM candidates WHERE id=?').get(id);
 const latestRun=id=>db.prepare("SELECT * FROM runs WHERE candidate_id=? AND status<>'PREVIEW' ORDER BY id DESC LIMIT 1").get(id);
@@ -72,11 +81,24 @@ ${x.extracted_text||''}`)].join('');
   const inferred=inferProfile(combined),old=parseJson(latest?.profile_json,{}),sticky={};
   for(const k of ['name','email','phone','linkedin','portfolio','instagram','pcd','cpf','birthDate','cep','address','neighborhood','additionalFacts']) if(old[k]!==undefined&&old[k]!==null&&old[k]!=='') sticky[k]=old[k];
   const profile={...inferred,...sticky,candidateId,rawText:combined};
-  if(latest) db.prepare('UPDATE resumes SET original_name=?,stored_path=?,extracted_text=?,profile_json=? WHERE id=?').run(primary.original_name,primary.stored_path,combined,json(profile),latest.id);
+  if(latest){ if(latest.base_resume_path)try{fs.rmSync(latest.base_resume_path,{force:true});}catch{}; db.prepare('UPDATE resumes SET original_name=?,stored_path=?,extracted_text=?,profile_json=?,base_resume_path=NULL,base_resume_text=NULL,base_resume_focus=NULL,base_resume_updated_at=NULL WHERE id=?').run(primary.original_name,primary.stored_path,combined,json(profile),latest.id); }
   else db.prepare('INSERT INTO resumes(candidate_id,original_name,stored_path,extracted_text,profile_json) VALUES(?,?,?,?,?)').run(candidateId,primary.original_name,primary.stored_path,combined,json(profile));
   return profile;
 }
 const normJobKey=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+function pendingFieldForQuestion(question){
+  const q=normJobKey(question);
+  if(/\bcpf\b/.test(q))return 'cpf';
+  if(/\bcep\b|codigo postal/.test(q))return 'cep';
+  if(/nascimento|data de nascimento/.test(q))return 'birthDate';
+  if(/endereco|logradouro/.test(q))return 'address';
+  if(/bairro|onde mora|onde reside|reside em|mora em|residencia|facil acesso|proximo|perto|distancia|desloc|trajeto|locomoc|como.*(?:chegaria|chegar)|tempo.*(?:empresa|trabalho|local)|onibus|brt|metro/.test(q))return 'neighborhood';
+  if(/linkedin/.test(q))return 'linkedin';
+  if(/instagram/.test(q))return 'instagram';
+  if(/portfolio|portifolio/.test(q))return 'portfolio';
+  return '';
+}
+const pendingFieldLabels={cpf:'CPF',cep:'CEP',birthDate:'Data de nascimento',address:'Endereço',neighborhood:'Bairro de residência',linkedin:'LinkedIn',instagram:'Instagram',portfolio:'Portfólio'};
 function canonicalUrl(value){
   try{const u=new URL(value);u.hash='';for(const k of [...u.searchParams.keys()])if(/^utm_|^(ref|source|src|fbclid|gclid)$/i.test(k))u.searchParams.delete(k);return u.toString().replace(/\/$/,'');}
   catch{return String(value||'').trim().replace(/\/$/,'');}
@@ -100,16 +122,19 @@ function recentJobs(rows,days=15){
 }
 const normSearch=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
 const rxEscape=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-function hasSearchTerm(text,term){
-  const t=normSearch(term); if(t.length<3)return false;
-  const pattern=rxEscape(t).replace(/\\ /g,'\\s+');
-  return new RegExp(`(^|[^a-z0-9])${pattern}([^a-z0-9]|$)`,'i').test(normSearch(text));
+function compileSearchEvidence(terms){
+  return [...new Set((terms||[]).map(normSearch).filter(x=>x.length>=3))].map(term=>{
+    const pattern=rxEscape(term).replace(/\\ /g,'\\s+');
+    return {term,rx:new RegExp(`(^|[^a-z0-9])${pattern}([^a-z0-9]|$)`,'i')};
+  });
 }
-function addSearchEvidence(job,terms){
+function addSearchEvidence(job,compiledTerms){
   const title=normSearch(job.title),body=normSearch(`${job.title||''} ${job.description||''} ${job.company||''}`);
-  const clean=[...new Set((terms||[]).map(normSearch).filter(x=>x.length>=3))];
-  const titleHits=clean.filter(t=>hasSearchTerm(title,t));
-  const bodyHits=clean.filter(t=>hasSearchTerm(body,t));
+  const titleHits=[],bodyHits=[];
+  for(const row of compiledTerms||[]){
+    if(row.rx.test(title))titleHits.push(row.term);
+    if(row.rx.test(body))bodyHits.push(row.term);
+  }
   return {...job,searchTitleHits:titleHits.length,searchBodyHits:bodyHits.length,searchTitleTerms:titleHits.slice(0,10),searchMatchedTerms:bodyHits.slice(0,10)};
 }
 // Login é classificado por vaga. Fontes inteiras nunca são bloqueadas por conveniência.
@@ -175,92 +200,202 @@ app.patch('/api/resume/:id/profile',(req,res) => {
   if(row.candidate_id) db.prepare('UPDATE candidates SET name=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(profile.name||'Sem nome',row.candidate_id);
   res.json({ok:true,candidateId:row.candidate_id,profile:{...profile,rawText:undefined}});
 });
+
+app.post('/api/resume/:id/optimize-base',async(req,res)=>{
+  try{
+    const id=Number(req.params.id),row=getResume(id);
+    if(!row)return res.status(404).json({error:'Currículo não encontrado'});
+    const supportDocuments=db.prepare('SELECT * FROM documents WHERE candidate_id=? AND is_primary=0 ORDER BY id').all(row.candidate_id);
+    const profile={...parseJson(row.profile_json,{}),candidateId:row.candidate_id,supportDocuments};
+    const focus=String(req.body?.focus||'').trim();
+    const template=['executive','classic','compact'].includes(String(req.body?.template||''))?String(req.body.template):String(row.base_resume_template||'executive');
+    const result=await optimizeBaseResume(row.stored_path,profile,focus,template);
+    if(row.base_resume_path&&row.base_resume_path!==result.file){try{fs.rmSync(row.base_resume_path,{force:true});}catch{}}
+    db.prepare('UPDATE resumes SET base_resume_path=?,base_resume_text=?,base_resume_focus=?,base_resume_template=?,base_resume_updated_at=CURRENT_TIMESTAMP WHERE id=?').run(result.file,result.text||'',result.focus||focus,result.template||template,id);
+    db.prepare('UPDATE candidates SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(row.candidate_id);
+    const updated=getResume(id);
+    res.json({ok:true,file:updated.base_resume_path,focus:updated.base_resume_focus,template:updated.base_resume_template||'executive',updatedAt:updated.base_resume_updated_at,validation:result.validation||null});
+  }catch(e){res.status(500).json({error:String(e?.message||e)});}
+});
+
+app.get('/api/resume/:id/base-file',(req,res)=>{
+  const row=getResume(Number(req.params.id));
+  const file=row?.base_resume_path;
+  if(!file||!fs.existsSync(file))return res.status(404).json({error:'Currículo-base otimizado ainda não foi gerado'});
+  res.download(path.resolve(file),'curriculo-base-otimizado.pdf');
+});
+app.get('/api/candidate/:id/pending-data',(req,res)=>{
+  const id=Number(req.params.id),candidate=getCandidate(id);
+  if(!candidate)return res.status(404).json({error:'Candidato não encontrado'});
+  const resume=db.prepare('SELECT * FROM resumes WHERE candidate_id=? ORDER BY id DESC LIMIT 1').get(id);
+  const run=latestRun(id);
+  if(!resume||!run)return res.json({runId:run?.id||null,total:0,requiredFields:[],custom:[],readyToRetry:0});
+  const profile=parseJson(resume.profile_json,{});
+  const saved=profile.formAnswers&&typeof profile.formAnswers==='object'?profile.formAnswers:{};
+  const rows=db.prepare(`SELECT a.job_id,a.error,j.title
+    FROM applications a JOIN jobs j ON j.id=a.job_id
+    WHERE a.run_id=? AND a.status='NEEDS_DATA'
+    ORDER BY a.job_id`).all(run.id);
+  const unique=new Map();
+  for(const row of rows){
+    const raw=String(row.error||'').replace(/^.*?Campos obrigat[^:]*:\s*/i,'').trim();
+    for(const part of raw.split(/\s*\|\s*/)){
+      const question=String(part||'').trim(); if(!question)continue;
+      const key=normJobKey(question); if(!key)continue;
+      if(!unique.has(key))unique.set(key,{question,jobs:[]});
+      unique.get(key).jobs.push({jobId:row.job_id,title:row.title});
+    }
+  }
+  const fieldMap=new Map(),custom=[];
+  for(const item of unique.values()){
+    const qnorm=normJobKey(item.question);
+    if(/(?:linkedin|instagram|portfolio|portifolio)/.test(qnorm)&&/(?:se tiver|se houver|opcional)/.test(qnorm))continue;
+    const field=pendingFieldForQuestion(item.question);
+    if(field){
+      if(!String(profile[field]??'').trim()){
+        if(!fieldMap.has(field))fieldMap.set(field,{field,label:pendingFieldLabels[field]||field,questions:[],jobs:[]});
+        const rec=fieldMap.get(field);rec.questions.push(item.question);rec.jobs.push(...item.jobs);
+      }
+      continue;
+    }
+    const savedKey=Object.keys(saved).find(k=>normJobKey(k)===normJobKey(item.question));
+    custom.push({question:item.question,answer:savedKey?String(saved[savedKey]??''):'',jobs:item.jobs});
+  }
+  const unresolvedCustom=custom.filter(x=>!String(x.answer||'').trim());
+  const requiredFields=[...fieldMap.values()];
+  const blockedJobIds=new Set();
+  for(const f of requiredFields)for(const j of f.jobs||[])blockedJobIds.add(j.jobId);
+  for(const c of unresolvedCustom)for(const j of c.jobs||[])blockedJobIds.add(j.jobId);
+  res.json({runId:run.id,total:rows.length,requiredFields,custom,readyToRetry:Math.max(0,rows.length-blockedJobIds.size)});
+});
+
+app.patch('/api/candidate/:id/pending-data',(req,res)=>{
+  const id=Number(req.params.id),resume=db.prepare('SELECT * FROM resumes WHERE candidate_id=? ORDER BY id DESC LIMIT 1').get(id);
+  if(!resume)return res.status(404).json({error:'Currículo não encontrado'});
+  const profile=parseJson(resume.profile_json,{});
+  const nextAnswers={...(profile.formAnswers&&typeof profile.formAnswers==='object'?profile.formAnswers:{})};
+  const answers=req.body?.answers&&typeof req.body.answers==='object'?req.body.answers:{};
+  for(const [question,value] of Object.entries(answers)){
+    const q=String(question||'').trim(),v=String(value??'').trim();
+    if(q&&v)nextAnswers[q]=v;
+  }
+  const fields=req.body?.fields&&typeof req.body.fields==='object'?req.body.fields:{};
+  const allowed=new Set(['cpf','cep','birthDate','address','neighborhood','linkedin','instagram','portfolio']);
+  for(const [key,value] of Object.entries(fields))if(allowed.has(key))profile[key]=String(value??'').trim();
+  profile.formAnswers=nextAnswers;
+  db.prepare('UPDATE resumes SET profile_json=? WHERE id=?').run(json(profile),resume.id);
+  db.prepare('UPDATE candidates SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+  res.json({ok:true,profile:{...profile,rawText:undefined}});
+});
 let searchInFlight=false;
+const aiReviewPromises=new Map();
+
+async function reviewPendingJobsForRun({runId,pending,profile,filters,batchSize,preview,candidateId}){
+  if(!pending.length)return;
+  const input=pending.map(j=>({...j,sendable:1,reason:'',verified:true,httpReady:true}));
+  const reviewed=await reviewVerifiedJobsWithAI(input,profile,filters,{maxJobs:input.length,batchSize:12});
+  const updJob=db.prepare('UPDATE jobs SET sendable=?,blocked_reason=?,selected=0,batch_no=0 WHERE run_id=? AND source_key=?');
+  for(const j of reviewed){
+    const fp=jobFingerprint(j),ok=j.sendable===1?1:0,reason=ok?'':String(j.reason||'AI_REVIEW_FAILED');
+    updJob.run(ok,reason,runId,fp);
+    const row=db.prepare('SELECT inventory_id,score,rank_position FROM jobs WHERE run_id=? AND source_key=?').get(runId,fp)||{};
+    upsertCandidateMatch({candidateId,inventoryId:Number(j.inventoryId||row.inventory_id||0),runId,score:j.score||row.score||0,decision:ok?'AI_APPROVED':reason,reason,rankPosition:row.rank_position||0,batchNo:0});
+  }
+
+  while(['APPLYING','RETRYING'].includes(String(getRun(runId)?.status||''))){
+    await new Promise(resolve=>setTimeout(resolve,750));
+  }
+  db.prepare('UPDATE jobs SET selected=0,batch_no=0 WHERE run_id=?').run(runId);
+  const activeBatch=Number(getRun(runId)?.active_batch||1);
+  const rows=db.prepare('SELECT id,inventory_id,score,rank_position FROM jobs WHERE run_id=? AND sendable=1 ORDER BY rank_position ASC,score DESC').all(runId);
+  const alloc=db.prepare('UPDATE jobs SET batch_no=?,selected=? WHERE id=?');
+  for(let i=0;i<rows.length;i++){
+    const row=rows[i],batch=Math.floor(i/batchSize)+1,selected=batch===activeBatch?1:0;
+    alloc.run(batch,selected,row.id);
+    upsertCandidateMatch({candidateId,inventoryId:row.inventory_id,runId,score:row.score||0,decision:selected?'SELECTED':'RESERVE',reason:'',rankPosition:row.rank_position||i+1,batchNo:batch});
+  }
+  recordRunEvent({runId,candidateId,type:'AI_REVIEW_COMPLETE',data:{reviewed:reviewed.length,approved:reviewed.filter(x=>x.sendable===1).length}});
+}
+
 app.post('/api/search', async (req,res) => {
   if(searchInFlight) return res.status(409).json({error:'Uma busca já está em andamento. Aguarde a conclusão para iniciar outra.'});
   searchInFlight=true;
   try {
     const {resumeId,filters={},preview=false} = req.body || {};
-    const resume = getResume(Number(resumeId));
+    let resume = getResume(Number(resumeId));
     if (!resume) return res.status(400).json({error:'Currículo não encontrado'});
     const profile = {...parseJson(resume.profile_json,{}),candidateId:resume.candidate_id};
-    const effectiveFilters={...filters,recencyDays:Math.max(1,Math.min(60,Number(filters.recencyDays||15)))};
+    if(!resume.base_resume_path||!fs.existsSync(resume.base_resume_path)){
+      const supportDocuments=db.prepare('SELECT * FROM documents WHERE candidate_id=? AND is_primary=0 ORDER BY id').all(resume.candidate_id);
+      const baseProfile={...profile,supportDocuments};
+      const baseFocus=String(filters.area||profile.desiredArea||'').trim();
+      const base=await optimizeBaseResume(resume.stored_path,baseProfile,baseFocus,resume.base_resume_template||'executive');
+      db.prepare('UPDATE resumes SET base_resume_path=?,base_resume_text=?,base_resume_focus=?,base_resume_template=?,base_resume_updated_at=CURRENT_TIMESTAMP WHERE id=?').run(base.file,base.text||'',base.focus||baseFocus,base.template||resume.base_resume_template||'executive',resume.id);
+      db.prepare('UPDATE candidates SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(resume.candidate_id);
+      resume=getResume(resume.id);
+    }
+    const recencyDays=[7,15,30].includes(Number(filters.recencyDays))?Number(filters.recencyDays):15;
+    const effectiveFilters={...filters,candidateId:resume.candidate_id,nationwide:false,limit:500,recencyDays};
+    // Fase de validação do produto: toda busca/candidatura usa apenas RioVagas.
+    // A compatibilidade continua sendo derivada individualmente de cada currículo.
+    effectiveFilters.publicSourcesOnly=true;
+    effectiveFilters.publicSourceKeys=['rio'];
+    effectiveFilters.agenticBroadReview=true;
+    const rioOnly=effectiveFilters.publicSourcesOnly===true&&Array.isArray(effectiveFilters.publicSourceKeys)&&effectiveFilters.publicSourceKeys.length===1&&effectiveFilters.publicSourceKeys[0]==='rio';
+    const priorRows=db.prepare('SELECT resume_id,filters_json FROM runs WHERE candidate_id=? AND resume_id=? ORDER BY id DESC LIMIT 8').all(resume.candidate_id,resume.id);
+    for(const row of priorRows){
+      const pf=parseJson(row.filters_json,{});
+      if(Number(pf.searchPlanEvidenceVersion||0)>=2&&String(pf.searchPlanVersion||'')==='quality-agent-v22-compact-queries'&&String(pf.searchFocus||'').trim()&&(pf.searchCoreTerms||[]).length>=1){
+        effectiveFilters.priorCareerPlan={evidenceVersion:pf.searchPlanEvidenceVersion,planVersion:pf.searchPlanVersion,focus:pf.searchFocus,families:pf.searchFamilies||[],core:pf.searchCoreTerms||[],adjacent:pf.searchAdjacentTerms||[],queries:pf.searchQueries||[],exclude:pf.searchExclusions||[],literal:pf.searchLiteralTerms||[],links:pf.searchPlanLinks||[]};
+        break;
+      }
+    }
     const searchTerms=await buildSearchTerms(profile,effectiveFilters);
     effectiveFilters.searchFocus=String(searchTerms.focus||'').trim();
+    effectiveFilters.searchFamilies=Array.isArray(searchTerms.families)?searchTerms.families:[];
+    effectiveFilters.searchLiteralTerms=Array.isArray(searchTerms.literal)?searchTerms.literal:[];
     effectiveFilters.searchCoreTerms=Array.isArray(searchTerms.core)?searchTerms.core:[];
     effectiveFilters.searchAdjacentTerms=Array.isArray(searchTerms.adjacent)?searchTerms.adjacent:[];
     effectiveFilters.searchTargetTerms=Array.isArray(searchTerms.targets)&&searchTerms.targets.length?searchTerms.targets:[...new Set([...effectiveFilters.searchCoreTerms,...effectiveFilters.searchAdjacentTerms])];
     effectiveFilters.searchQueries=Array.isArray(searchTerms.queries)?searchTerms.queries:[...searchTerms];
     effectiveFilters.searchExclusions=Array.isArray(searchTerms.exclusions)?searchTerms.exclusions:[];
-    const raw = await searchJobs(profile,effectiveFilters,searchTerms);
-    const recent=recentJobs(raw,effectiveFilters.recencyDays).map(j=>addSearchEvidence(j,searchTerms));
-    const poolUpsert=db.prepare(`INSERT INTO candidate_job_pool
-      (candidate_id,fingerprint,source,url,title,company,location,salary,description,contract_type,published_at,last_seen_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
-      ON CONFLICT(candidate_id,fingerprint) DO UPDATE SET source=excluded.source,url=excluded.url,title=excluded.title,
-      company=excluded.company,location=excluded.location,salary=excluded.salary,description=excluded.description,
-      contract_type=excluded.contract_type,published_at=excluded.published_at,last_seen_at=CURRENT_TIMESTAMP`);
-    for(const j of recent) poolUpsert.run(resume.candidate_id,jobFingerprint(j),j.source||'',j.url||'',j.title||'',j.company||'',j.location||'',j.salary||'',j.description||'',j.contractType||'',j.publishedAt||'');
-    const cutoffIso=new Date(Date.now()-effectiveFilters.recencyDays*86400000).toISOString().slice(0,10);
-    const poolRows=db.prepare('SELECT * FROM candidate_job_pool WHERE candidate_id=? AND published_at>=?').all(resume.candidate_id,cutoffIso);
-    const poolMap=new Map(poolRows.map(x=>[x.fingerprint,x]));
-    const storedPool=poolRows.map(x=>({source:x.source,title:x.title,company:x.company,location:x.location,salary:x.salary,url:x.url,description:x.description,contractType:x.contract_type,publishedAt:x.published_at,loginFreeCandidate:x.source==='RioVagas',requiresLogin:['LOGIN_REQUIRED','EMAIL_REQUIRED'].includes(x.blocked_reason),broadCollection:/^(RioVagas|EmpregosRJ)$/i.test(x.source||'')}));
-    const candidatePool=dedupeJobs([...new Map([...storedPool,...recent].map(j=>[jobFingerprint(j),addSearchEvidence(j,searchTerms)])).values()]);
-    for(const j of candidatePool){const cached=poolMap.get(jobFingerprint(j));if(j.source==='RioVagas')j.loginFreeCandidate=true;if(['LOGIN_REQUIRED','EMAIL_REQUIRED'].includes(cached?.blocked_reason))j.requiresLogin=true;}
-    const historyRows=db.prepare("SELECT fingerprint FROM candidate_job_history WHERE candidate_id=? AND status IN ('SENT','ALREADY_APPLIED')").all(resume.candidate_id);
-    const seen=new Set(historyRows.map(x=>x.fingerprint));
-    const unseen=candidatePool.filter(j=>!seen.has(jobFingerprint(j)));
-    const ranked = rankJobs(unseen,profile,effectiveFilters);
-    const sourceQueuePriority=j=>/^(RioVagas)$/i.test(String(j.source||''))?100:/riovagas\.com\.br/i.test(String(j.source||'')+' '+String(j.url||''))?90:0;
-    ranked.sort((a,b)=>sourceQueuePriority(b)-sourceQueuePriority(a)||(b.score||0)-(a.score||0));
+    effectiveFilters.searchPlanEvidenceVersion=Number(searchTerms.evidenceVersion||0);
+    effectiveFilters.searchPlanLinks=Array.isArray(searchTerms.links)?searchTerms.links:[];
+    effectiveFilters.searchPlanVersion=String(searchTerms.planVersion||'');
+    const raw=await searchJobs(profile,effectiveFilters,searchTerms);
+    const evidenceMatcher=compileSearchEvidence(searchTerms);
+    const recent=recentJobs(raw,effectiveFilters.recencyDays).map(j=>addSearchEvidence(j,evidenceMatcher));
+    const candidatePool=dedupeJobs(recent);
+    const historyRows=db.prepare("SELECT fingerprint,provider_job_id,status,last_run_id FROM candidate_job_history WHERE candidate_id=? AND status IN ('SENT','ALREADY_APPLIED')").all(resume.candidate_id);
+    const sentHistory=new Map(historyRows.map(x=>[x.fingerprint,x]));
+    const sentProviderIds=new Set(historyRows.map(x=>String(x.provider_job_id||'')).filter(Boolean));
+    const terminalIds=terminalInventoryIds(resume.candidate_id);
+    const alreadyDone=j=>(Number(j.inventoryId)>0&&terminalIds.has(Number(j.inventoryId)))||
+      (String(j.externalId||'')&&sentProviderIds.has(String(j.externalId)))||sentHistory.has(jobFingerprint(j));
+    const unseen=candidatePool.filter(j=>!alreadyDone(j));
+    const alreadySentPool=candidatePool.filter(alreadyDone);
+    const ranked=prefilterJobsForAI(unseen,profile,effectiveFilters);
+    ranked.sort((a,b)=>(b.score||0)-(a.score||0)||(Number.isFinite(a.ftsRank)?a.ftsRank:999999)-(Number.isFinite(b.ftsRank)?b.ftsRank:999999));
     const batchSize=Math.min(500,Math.max(100,Number(effectiveFilters.limit||500)));
-    const desiredReady=Math.min(ranked.length,Math.max(batchSize,Math.ceil(batchSize*1.15)));
-    const verificationChunk=Math.max(80,Math.min(180,Math.ceil(batchSize*0.55)));
-    const preparedRaw=[];
-    let approvedCount=0,verificationOffset=0;
-    while(verificationOffset<ranked.length&&approvedCount<desiredReady){
-      const rankedChunk=ranked.slice(verificationOffset,verificationOffset+verificationChunk);
-      verificationOffset+=rankedChunk.length;
-      const checked=await classifyJobsForQueue(rankedChunk,{batchSize:rankedChunk.length,probeLimit:rankedChunk.length});
-      for(const j of checked)if(j.detailText)j.description=[j.description||'',j.detailText].filter(Boolean).join('\n\n').slice(0,50000);
-      const browserCandidates=checked.filter(j=>j.sendable===1&&!j.httpReady).map((j,i)=>({...j,id:-(verificationOffset*1000+i+1),_original:j}));
-      if(browserCandidates.length){
-        const browserCheck=createJobContextCollector(browserCandidates,{concurrency:Math.max(3,Math.min(8,Number(process.env.SEARCH_VERIFY_WORKERS||6)))});
-        for(const probe of browserCandidates){
-          const ctx=await browserCheck.get(probe.id);
-          const original=probe._original;
-          if(ctx?.blocked){
-            original.sendable=0;
-            original.reason=/login necess[aá]rio/i.test(ctx.blocked)?'LOGIN_REQUIRED':'BLOCKED';
-            original.verified=true;
-          }else if(!ctx?.ready){
-            original.sendable=0;
-            original.reason='NO_APPLICATION_FORM';
-            original.verified=true;
-          }else{
-            original.sendable=1;
-            original.reason='';
-            original.verified=true;
-            original.surfaceVerified=true;
-            if(ctx?.url)original.url=ctx.url;
-            if(ctx?.text)original.description=[original.description||'',ctx.text].filter(Boolean).join('\n\n').slice(0,50000);
-          }
-        }
-        await browserCheck.done.catch(()=>{});
-      }
-      const reviewed=await reviewVerifiedJobsWithAI(checked,profile,effectiveFilters,{maxJobs:rankedChunk.length,batchSize:55});
-      preparedRaw.push(...reviewed);
-      approvedCount=preparedRaw.reduce((n,j)=>n+(j.sendable===1?1:0),0);
-    }
+    const checked=await classifyJobsForQueue(ranked,{batchSize:Math.max(1,ranked.length),probeLimit:Math.max(1,ranked.length)});
+    for(const j of checked)if(j.detailText)j.description=[j.description||'',j.detailText].filter(Boolean).join('\n\n').slice(0,50000);
+    const preparedRaw=checked.map(j=>{
+      if(j.sendable!==1)return j;
+      if(jobNeedsAIReview(j,effectiveFilters))return {...j,sendable:0,reason:'AI_REVIEW_PENDING',verified:true,aiReviewed:false};
+      return {...j,aiReviewed:true,reviewMethod:'rules',aiReason:'Compatibilidade direta validada por requisitos objetivos e evidência do currículo.'};
+    });
     const prepared=[]; const preparedUrls=new Set();
     for(const j of preparedRaw){
       const key=canonicalUrl(j.url)||jobFingerprint(j);
       if(preparedUrls.has(key))continue;
       preparedUrls.add(key);prepared.push(j);
     }
-    const poolClassified=db.prepare("UPDATE candidate_job_pool SET score=?,sendable=?,blocked_reason=?,last_seen_at=CURRENT_TIMESTAMP WHERE candidate_id=? AND fingerprint=?");
-    for(const j of prepared) poolClassified.run(j.score||0,j.sendable?1:0,j.reason||'',resume.candidate_id,jobFingerprint(j));
     prepared.forEach((j,index)=>{j._rank=index+1;});
+    const alreadySent=alreadySentPool.map((j,index)=>{
+      const fp=jobFingerprint(j),hist=sentHistory.get(fp)||{};
+      return {...j,score:Number(j.score||0),sendable:0,reason:'ALREADY_SENT',alreadySent:true,
+        previousStatus:hist.status||'SENT',previousRunId:hist.last_run_id||null,_rank:prepared.length+index+1,_batch:0,_selected:0};
+    });
     let sendableIndex=0;
     for(const j of prepared) if(j.sendable){sendableIndex++;j._batch=Math.floor((sendableIndex-1)/batchSize)+1;j._selected=j._batch===1?1:0;} else {j._batch=0;j._selected=0;}
     const selected=prepared.filter(j=>j._selected===1);
@@ -271,197 +406,209 @@ app.post('/api/search', async (req,res) => {
     const info = db.prepare('INSERT INTO runs(candidate_id,filters_json,resume_id,status,active_batch) VALUES(?,?,?,?,1)')
       .run(resume.candidate_id,json(effectiveFilters),resume.id,preview?'PREVIEW':'SEARCHED');
     if(!preview) db.prepare('UPDATE candidates SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(resume.candidate_id);
-    const runId = Number(info.lastInsertRowid);
+    const runId=Number(info.lastInsertRowid);
+    recordRunEvent({runId,candidateId:resume.candidate_id,type:'SEARCH_START',data:{recencyDays,inventory:raw.length,terms:Array.from(searchTerms).slice(0,24)}});
     const ins = db.prepare(`INSERT OR IGNORE INTO jobs
-      (run_id,source,source_key,title,company,salary,location,url,description,score,pcd,remote,contract_type,published_at,sendable,blocked_reason,selected,batch_no,rank_position)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-    const hist=db.prepare(`INSERT INTO candidate_job_history
-      (candidate_id,fingerprint,source,url,title,company,location,published_at,status,last_run_id)
-      VALUES(?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(candidate_id,fingerprint) DO UPDATE SET last_seen_at=CURRENT_TIMESTAMP,last_run_id=excluded.last_run_id,status=excluded.status`);
-    for (const j of prepared){
-      const fp=jobFingerprint(j);
-      const histStatus=j.sendable?(j._selected?'SELECTED':'RESERVE'):((j.reason==='LOGIN_REQUIRED'||j.reason==='EMAIL_REQUIRED')?'BLOCKED_LOGIN':'UNVERIFIED_LOGIN');
-      ins.run(runId,j.source,fp,j.title,j.company||'',j.salary||'',j.location||'',j.url,j.description||'',j.score||0,j.pcd?1:0,j.remote?1:0,j.contractType|| (j.pj?'PJ':j.clt?'CLT':''),j.publishedAt||'',j.sendable,j.reason||'',j._selected,j._batch,j._rank);
-      if(j._selected&&!preview) hist.run(resume.candidate_id,fp,j.source||'',j.url||'',j.title||'',j.company||'',j.location||'',j.publishedAt||'',histStatus,runId);
+      (run_id,inventory_id,provider_job_id,source,source_key,title,company,salary,location,url,description,score,pcd,remote,contract_type,published_at,sendable,blocked_reason,selected,batch_no,rank_position)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+
+    db.exec('BEGIN');
+    try{
+      for (const j of [...prepared,...alreadySent]){
+        const fp=jobFingerprint(j);
+        ins.run(runId,Number(j.inventoryId)||null,String(j.externalId||''),j.source,fp,j.title,j.company||'',j.salary||'',j.location||'',j.url,j.description||'',j.score||0,j.pcd?1:0,j.remote?1:0,j.contractType||(j.pj?'PJ':j.clt?'CLT':''),j.publishedAt||'',j.sendable,j.reason||'',j._selected,j._batch,j._rank);
+        const decision=j.alreadySent?(j.previousStatus||'ALREADY_APPLIED'):(j.sendable?(j._selected?'SELECTED':'RESERVE'):(j.reason||'REJECTED'));
+        upsertCandidateMatch({candidateId:resume.candidate_id,inventoryId:j.inventoryId,runId,score:j.score||0,decision,reason:j.reason||'',rankPosition:j._rank,batchNo:j._batch});
+      }
+      db.exec('COMMIT');
+    }catch(e){try{db.exec('ROLLBACK');}catch{}throw e;}
+    const allPendingReview=prepared.filter(j=>j.reason==='AI_REVIEW_PENDING');
+    const reviewSlots=Math.max(0,Math.min(12,batchSize-sendable.length));
+    const pendingReview=allPendingReview.slice(0,reviewSlots);
+    const deferredReview=allPendingReview.slice(reviewSlots);
+    if(deferredReview.length){
+      const defer=db.prepare("UPDATE jobs SET blocked_reason='AMBIGUOUS_LOW_CONFIDENCE',sendable=0,selected=0,batch_no=0 WHERE run_id=? AND source_key=?");
+      for(const j of deferredReview){
+        const fp=jobFingerprint(j);defer.run(runId,fp);
+        upsertCandidateMatch({candidateId:resume.candidate_id,inventoryId:j.inventoryId,runId,score:j.score||0,decision:'AMBIGUOUS_LOW_CONFIDENCE',reason:'AMBIGUOUS_LOW_CONFIDENCE',rankPosition:j._rank,batchNo:0});
+      }
+    }
+    if(pendingReview.length){
+      const reviewPromise=reviewPendingJobsForRun({runId,pending:pendingReview,profile,filters:effectiveFilters,batchSize,preview:Boolean(preview),candidateId:resume.candidate_id})
+        .catch(e=>{
+          console.error('[ranking] review failed',String(e?.message||e));
+          db.prepare("UPDATE jobs SET blocked_reason='AI_REVIEW_FAILED' WHERE run_id=? AND blocked_reason='AI_REVIEW_PENDING'").run(runId);
+        })
+        .finally(()=>aiReviewPromises.delete(runId));
+      aiReviewPromises.set(runId,reviewPromise);
     }
     const countBySource=rows=>Object.fromEntries(Object.entries(rows.reduce((acc,j)=>{const k=j.source||'Outra';acc[k]=(acc[k]||0)+1;return acc;},{})).sort((a,b)=>b[1]-a[1]));
-    res.json({runId,preview:Boolean(preview),found:raw.length,recent:recent.length,staleSkipped:raw.length-recent.length,previouslySeenSkipped:Math.max(0,candidatePool.length-unseen.length),poolTotal:candidatePool.length,compatible:selected.length,compatibleTotal:prepared.length,sendableTotal:sendable.length,reserve:Math.max(0,sendable.length-selected.length),blockedLogin:blocked.length,blockedEmail:blockedEmail.length,unverifiedLogin:unverified.length,batches:Math.max(1,Math.ceil(sendable.length/batchSize)),sourceCounts:countBySource(candidatePool),freshSourceCounts:countBySource(raw),compatibleSourceCounts:countBySource(selected),sendableSourceCounts:countBySource(sendable),blockedSourceCounts:countBySource(blocked),unverifiedSourceCounts:countBySource(unverified),jobs:selected});
+    const finalAll=getAllJobs(runId);
+    const finalJobs=getBatchJobs(runId);
+    const finalSelected=finalAll.filter(j=>Number(j.sendable)===1&&Number(j.selected)===1);
+    const finalSendable=finalAll.filter(j=>Number(j.sendable)===1);
+    const finalBlocked=finalAll.filter(j=>['LOGIN_REQUIRED','EMAIL_REQUIRED'].includes(j.blocked_reason));
+    const finalPending=finalAll.filter(j=>j.blocked_reason==='AI_REVIEW_PENDING');
+    const finalUnverified=finalAll.filter(j=>Number(j.sendable)===0&&!['LOGIN_REQUIRED','EMAIL_REQUIRED','AI_REVIEW_PENDING','ALREADY_SENT'].includes(j.blocked_reason));
+    const finalAlreadySent=finalAll.filter(j=>j.blocked_reason==='ALREADY_SENT');
+    const finalBatches=Math.max(1,...finalSendable.map(j=>Number(j.batch_no||1)));
+    recordRunEvent({runId,candidateId:resume.candidate_id,type:'SEARCH_COMPLETE',data:{inventory:raw.length,pool:candidatePool.length,ranked:ranked.length,sendable:finalSendable.length,selected:finalSelected.length,aiPending:finalPending.length}});
+    res.json({runId,preview:Boolean(preview),found:raw.length,recent:recent.length,staleSkipped:raw.length-recent.length,previouslySeenSkipped:Math.max(0,candidatePool.length-unseen.length),poolTotal:candidatePool.length,compatible:finalSelected.length,compatibleTotal:prepared.length,sendableTotal:finalSendable.length,reserve:Math.max(0,finalSendable.length-finalSelected.length),blockedLogin:0,blockedEmail:0,aiReviewPending:finalPending.length,unverifiedLogin:finalUnverified.length,batches:finalBatches,sourceCounts:countBySource(candidatePool),freshSourceCounts:countBySource(raw),compatibleSourceCounts:countBySource(finalSelected),sendableSourceCounts:countBySource(finalSendable),blockedSourceCounts:countBySource(finalBlocked),unverifiedSourceCounts:countBySource(finalUnverified),alreadySentTotal:finalAlreadySent.length,jobs:finalJobs});
   } catch(e) { res.status(500).json({error:String(e.message||e)}); }
   finally { searchInFlight=false; }
 });
 
-app.get('/api/run/:id/jobs',(req,res)=>res.json(getJobs(Number(req.params.id))));
-async function processRun(runId,onlyErrors=false) {
-  const run=getRun(runId); if(!run) throw new Error('Execução não encontrada');
+app.get('/api/run/:id/jobs',(req,res)=>res.json(getBatchJobs(Number(req.params.id))));
+async function processRun(runId,onlyErrors=false){
+  const run=getRun(runId);if(!run)throw new Error('Execução não encontrada');
   const resume=getResume(run.resume_id);
   const supportDocuments=db.prepare('SELECT kind,original_name,stored_path FROM documents WHERE candidate_id=? AND is_primary=0').all(run.candidate_id);
   const profile={...parseJson(resume.profile_json,{}),candidateId:run.candidate_id,supportDocuments};
   const prefs={...parseJson(run.filters_json,{}),candidateId:run.candidate_id};
   const dryRun=!prefs.autoSubmit;
-  let jobs=getJobs(runId);
+  const applicationResume=(resume.base_resume_path&&fs.existsSync(resume.base_resume_path))?resume.base_resume_path:'';
+  if(!applicationResume)throw new Error('Currículo-base ainda não foi gerado. Gere o currículo otimizado antes de iniciar os envios.');
+
+  let jobs=getJobs(runId).filter(job=>/^RioVagas$/i.test(String(job?.source||''))&&/riovagas\.com\.br\/riovagas\//i.test(String(job?.url||'')));
   if(onlyErrors){
-    const ids=new Set(db.prepare("SELECT job_id FROM applications WHERE run_id=? AND status IN ('ERROR','ERROR','PREPARING','READY')").all(runId).map(x=>x.job_id));
-    jobs=jobs.filter(x=>ids.has(x.id));
-  }
-  db.prepare('UPDATE runs SET status=? WHERE id=?').run(onlyErrors?'RETRYING':'APPLYING',runId);
-
-  const collector=createJobContextCollector(jobs,{concurrency:Math.max(3,Math.min(10,Number(process.env.PREFLIGHT_WORKERS||8)))});
-  collector.done.catch(()=>{});
-  const ready=[];
-  const waiters=[];
-  let producerDone=false;
-
-  const wake=()=>{
-    while(waiters.length && (ready.length || producerDone)) waiters.shift()();
-  };
-  const push=item=>{ready.push(item);wake();};
-  const pop=async()=>{
-    while(!ready.length){
-      if(producerDone) return null;
-      await new Promise(resolve=>waiters.push(resolve));
+    const ids=new Set(db.prepare("SELECT job_id FROM applications WHERE run_id=? AND status IN ('ERROR','NEEDS_DATA','PREPARING','READY')").all(runId).map(x=>x.job_id));
+    const retryCandidates=jobs.filter(x=>ids.has(x.id)).map(x=>({...x,contractType:x.contract_type||'',publishedAt:x.published_at||''}));
+    const eligible=prefilterJobsForAI(retryCandidates,profile,prefs);
+    const eligibleIds=new Set(eligible.map(x=>x.id));
+    for(const job of retryCandidates.filter(x=>!eligibleIds.has(x.id))){
+      db.prepare("UPDATE applications SET status='SKIPPED_INCOMPATIBLE',error=? WHERE run_id=? AND job_id=?").run('Ignorada na retentativa: vaga incompatível com o perfil profissional atual.',runId,job.id);
+      db.prepare('UPDATE jobs SET selected=0 WHERE id=?').run(job.id);
+      updateCandidateMatchStatus(run.candidate_id,job.inventory_id,'SKIPPED_INCOMPATIBLE','Perfil não compatível na retentativa',runId);
     }
-    return ready.shift();
-  };
+    jobs=eligible;
+  }
 
-  const saveApplication=(job,status,tailoredFile='',error='')=>{
-    db.prepare(`INSERT INTO applications(run_id,job_id,status,tailored_file,error,submitted_at)
-      VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,job_id) DO UPDATE SET status=excluded.status,
-      tailored_file=CASE WHEN excluded.tailored_file<>'' THEN excluded.tailored_file ELSE applications.tailored_file END,
-      error=excluded.error,submitted_at=excluded.submitted_at`)
-      .run(runId,job.id,status,tailoredFile,error||'',['SENT','ALREADY_APPLIED'].includes(status)?new Date().toISOString():null);
+  db.prepare('UPDATE runs SET status=? WHERE id=?').run(onlyErrors?'RETRYING':'APPLYING',runId);
+  recordRunEvent({runId,candidateId:run.candidate_id,type:onlyErrors?'RETRY_START':'APPLY_START',data:{jobs:jobs.length,dryRun}});
+
+  const saveApplication=(job,status,error='')=>{
+    const row=db.prepare(`INSERT INTO applications(run_id,job_id,status,tailored_file,error,submitted_at)
+      VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,job_id) DO UPDATE SET
+        status=excluded.status,error=excluded.error,submitted_at=excluded.submitted_at
+      RETURNING id`).get(runId,job.id,status,'',error||'',['SENT','ALREADY_APPLIED'].includes(status)?new Date().toISOString():null);
+    return Number(row?.id||db.prepare('SELECT id FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id)?.id||0);
+  };
+  const saveReceipt=(applicationId,job,receipt)=>{
+    if(!applicationId||!receipt)return;
+    db.prepare(`INSERT INTO application_receipts
+      (application_id,candidate_id,inventory_id,provider,provider_job_id,confirmation_type,http_status,response_url,response_hash,confirmation_text)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`).run(applicationId,run.candidate_id,Number(job.inventory_id)||null,receipt.provider||'RioVagas',receipt.providerJobId||'',receipt.confirmationType||'UNKNOWN',receipt.httpStatus??null,receipt.responseUrl||'',receipt.responseHash||'',receipt.confirmationText||'');
   };
   const updateHistory=(job,status)=>{
-    if(job.source_key) db.prepare(`UPDATE candidate_job_history SET status=?,last_seen_at=CURRENT_TIMESTAMP,last_run_id=?
-      WHERE candidate_id=? AND fingerprint=?`).run(status,runId,run.candidate_id,job.source_key);
+    if(!job.source_key)return;
+    const providerJobId=String(job.provider_job_id||'');
+    if(providerJobId){
+      const existing=db.prepare(`SELECT id,status,last_run_id FROM candidate_job_history
+        WHERE candidate_id=? AND source=? AND provider_job_id=? ORDER BY id LIMIT 1`).get(run.candidate_id,job.source||'',providerJobId);
+      if(existing){
+        db.prepare(`UPDATE candidate_job_history SET fingerprint=?,url=?,title=?,company=?,location=?,published_at=?,last_seen_at=CURRENT_TIMESTAMP,
+          last_run_id=CASE WHEN status IN ('SENT','ALREADY_APPLIED') THEN last_run_id ELSE ? END,
+          status=CASE WHEN status IN ('SENT','ALREADY_APPLIED') THEN status ELSE ? END WHERE id=?`)
+          .run(job.source_key,job.url||'',job.title||'',job.company||'',job.location||'',job.published_at||'',runId,status,existing.id);
+        return;
+      }
+    }
+    db.prepare(`INSERT INTO candidate_job_history
+      (candidate_id,fingerprint,provider_job_id,source,url,title,company,location,published_at,status,last_run_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(candidate_id,fingerprint) DO UPDATE SET
+        provider_job_id=CASE WHEN excluded.provider_job_id<>'' THEN excluded.provider_job_id ELSE candidate_job_history.provider_job_id END,
+        source=excluded.source,url=excluded.url,title=excluded.title,company=excluded.company,location=excluded.location,published_at=excluded.published_at,
+        last_seen_at=CURRENT_TIMESTAMP,
+        last_run_id=CASE WHEN candidate_job_history.status IN ('SENT','ALREADY_APPLIED') THEN candidate_job_history.last_run_id ELSE excluded.last_run_id END,
+        status=CASE WHEN candidate_job_history.status IN ('SENT','ALREADY_APPLIED') THEN candidate_job_history.status ELSE excluded.status END`)
+      .run(run.candidate_id,job.source_key,providerJobId,job.source||'',job.url||'',job.title||'',job.company||'',job.location||'',job.published_at||'',status,runId);
   };
 
-  async function producer(){
-    const BATCH_SIZE=Math.max(2,Math.min(50,Number(process.env.AI_JOB_BATCH_SIZE||50)));
-    let cursor=0;
-    try{
-      while(cursor<jobs.length){
-        const batch=[], existingFiles=new Map();
-        while(cursor<jobs.length&&batch.length<BATCH_SIZE){
-          const job=jobs[cursor++];
-          const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
-          if(['SENT','ALREADY_APPLIED'].includes(old?.status))continue;
-          if(old?.tailored_file&&fs.existsSync(old.tailored_file))existingFiles.set(job.id,old.tailored_file);
-          batch.push(job);
-        }
-        if(!batch.length)continue;
-        const contexts=await Promise.all(batch.map(async job=>({job,ctx:await collector.get(job.id)})));
-        const enriched=[];
-        for(const {job,ctx} of contexts){
-          if(ctx?.blocked){
-            const isLogin=/login necess[aá]rio/i.test(ctx.blocked);
-            db.prepare("UPDATE jobs SET sendable=0,blocked_reason=?,selected=0,batch_no=0 WHERE id=?").run(isLogin?'LOGIN_REQUIRED':'BLOCKED',job.id);
-            db.prepare('DELETE FROM applications WHERE run_id=? AND job_id=?').run(runId,job.id);
-            updateHistory(job,isLogin?'BLOCKED_LOGIN':'BLOCKED');
-            continue;
-          }
-          if(!ctx?.ready){
-            db.prepare("UPDATE jobs SET sendable=0,blocked_reason='NO_APPLICATION_FORM',selected=0,batch_no=0 WHERE id=?").run(job.id);
-            db.prepare('DELETE FROM applications WHERE run_id=? AND job_id=?').run(runId,job.id);
-            updateHistory(job,'NO_APPLICATION_FORM');
-            continue;
-          }
-          const existing=existingFiles.get(job.id);
-          if(existing){
-            const readyJob={...job,url:ctx?.url||job.url};
-            saveApplication(job,'READY',existing,'');
-            push({job:readyJob,file:existing});
-            continue;
-          }
-          saveApplication(job,'PREPARING','','');
-          enriched.push({...job,url:ctx?.url||job.url,description:[job.description||'',ctx?.text||''].filter(Boolean).join('\n\n').slice(0,50000)});
-        }
-        if(!enriched.length)continue;
-        try{
-          const generated=await tailorResumesBatch(resume.stored_path,enriched,profile);
-          const byId=new Map(generated.map(x=>[String(x.jobId),x]));
-          for(const job of enriched){
-            const tailored=byId.get(String(job.id));
-            if(!tailored?.file)throw new Error('Lote de currículos retornou item incompleto');
-            saveApplication(job,'READY',tailored.file,'');push({job,file:tailored.file});
-          }
-        }catch(batchError){
-          for(const job of enriched){
-            try{const tailored=await tailorResume(resume.stored_path,job,profile);saveApplication(job,'READY',tailored.file,'');push({job,file:tailored.file});}
-            catch(e){const message=String(e?.message||batchError?.message||e).slice(0,500);saveApplication(job,'ERROR','',message);updateHistory(job,'ERROR');}
-          }
-        }
-      }
-    }finally{producerDone=true;wake();await collector.done.catch(()=>{});}
-  }
-
-  const domainState=new Map();
-  const domainKey=job=>{try{return new URL(job.url).hostname.replace(/^www\./,'').toLowerCase();}catch{return String(job.source||'other').toLowerCase();}};
-  const domainLimit=job=>{const k=domainKey(job);if(/riovagas\.com\.br/.test(k))return 2;if(/gupy\.io|linkedin\.com|indeed\.|catho\.|glassdoor\./.test(k))return 1;return 2;};
-  async function acquireDomain(job){
-    const key=domainKey(job),limit=domainLimit(job);let state=domainState.get(key);
-    if(!state){state={active:0,wait:[]};domainState.set(key,state);}
-    if(state.active>=limit)await new Promise(resolve=>state.wait.push(resolve));
-    state.active++;
-    return ()=>{state.active=Math.max(0,state.active-1);const next=state.wait.shift();if(next)next();};
-  }
-
-  let applicationBrowser=null;
-  async function applyWorker(){
-    const workerContext=await createApplicationContext(applicationBrowser);
-    try{while(true){
-      const item=await pop();
-      if(!item) return;
-      const {job,file}=item;
+  let cursor=0;
+  const workerCount=Math.max(2,Math.min(8,Number(process.env.RIO_APPLY_WORKERS||4)));
+  async function worker(){
+    while(true){
+      const index=cursor++;if(index>=jobs.length)return;
+      const job=jobs[index];
       const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
-      if(['SENT','ALREADY_APPLIED'].includes(old?.status)) continue;
-      let releaseDomain=null;
+      if(['SENT','ALREADY_APPLIED'].includes(old?.status))continue;
       try{
-        releaseDomain=await acquireDomain(job);
-        let result=await applyToJob(job,file,profile,prefs,{dryRun,browser:applicationBrowser,context:workerContext});
-        if(result.status==='ERROR'&&/timeout|ERR_(?:CONNECTION|NAME|TIMED)|navigation|target closed/i.test(String(result.error||''))&&!/sem confirma[cç][aã]o|submit|enviado/i.test(String(result.error||''))){
-          await new Promise(r=>setTimeout(r,500));
-          result=await applyToJob(job,file,profile,prefs,{dryRun,browser:applicationBrowser,context:workerContext});
-        }
-        saveApplication(job,result.status,file,result.error||'');
-        if(result.status==='SKIPPED_LOGIN') db.prepare("UPDATE jobs SET sendable=0,blocked_reason='LOGIN_REQUIRED',selected=0,batch_no=0 WHERE id=?").run(job.id);
+        saveApplication(job,'PREPARING','');
+        const result=await applyRioVagasDirect(job,applicationResume,profile,prefs,{dryRun});
+        const applicationId=saveApplication(job,result.status,result.error||'');
+        saveReceipt(applicationId,job,result.receipt);
+        if(result.status==='CLOSED')db.prepare("UPDATE jobs SET sendable=0,blocked_reason='CLOSED',selected=0,batch_no=0 WHERE id=?").run(job.id);
         updateHistory(job,result.status);
+        updateCandidateMatchStatus(run.candidate_id,job.inventory_id,result.status,result.error||'',runId);
+        recordRunEvent({runId,candidateId:run.candidate_id,type:'APPLICATION_RESULT',data:{jobId:job.id,inventoryId:job.inventory_id,status:result.status,error:String(result.error||'').slice(0,240),receiptType:result.receipt?.confirmationType||''}});
       }catch(e){
         const message=String(e?.message||e).slice(0,500);
-        saveApplication(job,'ERROR',file,message);
+        saveApplication(job,'ERROR',message);
         updateHistory(job,'ERROR');
-      }finally{if(releaseDomain)releaseDomain();}
-    }}finally{await workerContext.close().catch(()=>{});}
+        updateCandidateMatchStatus(run.candidate_id,job.inventory_id,'ERROR',message,runId);
+        recordRunEvent({runId,candidateId:run.candidate_id,type:'APPLICATION_ERROR',data:{jobId:job.id,inventoryId:job.inventory_id,error:message}});
+      }
+    }
   }
-
-  const workerCount=Math.max(3,Math.min(10,Number(process.env.APPLY_WORKERS||8)));
-  applicationBrowser=await createApplicationBrowser();
-  try{
-    const workers=Array.from({length:workerCount},()=>applyWorker());
-    await Promise.all([producer(),...workers]);
-  }finally{
-    if(applicationBrowser)await applicationBrowser.close().catch(()=>{});
-  }
-  if(!dryRun) await closeLoginSession();
+  await Promise.all(Array.from({length:Math.min(workerCount,Math.max(1,jobs.length))},()=>worker()));
   db.prepare('UPDATE runs SET status=? WHERE id=?').run('DONE',runId);
+  recordRunEvent({runId,candidateId:run.candidate_id,type:'APPLY_COMPLETE',data:runMetrics(runId)});
 }
 
 function startBackground(runId,onlyErrors){
-  setImmediate(()=>processRun(runId,onlyErrors).catch(e=>{
-    db.prepare('UPDATE runs SET status=? WHERE id=?').run(`ERROR: ${String(e.message||e).slice(0,120)}`,runId);
-  }));
+  // Start processing the already-approved selection immediately.
+  // Ambiguous jobs can keep being reviewed in the background and join later batches.
+  setImmediate(async()=>{
+    try{
+      await processRun(runId,onlyErrors);
+    }catch(e){
+      db.prepare('UPDATE runs SET status=? WHERE id=?').run('ERROR: '+String(e.message||e).slice(0,120),runId);
+    }
+  });
 }
 
 app.get('/api/execution',(req,res)=>res.json({path:runtime.session}));
 
+function persistRunSelection(runId,selectedJobIds){
+  const run=getRun(runId);
+  if(!run)throw new Error('Execução não encontrada');
+  const batch=Math.max(1,Number(run.active_batch||1));
+  const allowed=db.prepare('SELECT id FROM jobs WHERE run_id=? AND sendable=1 AND batch_no=?').all(runId,batch).map(x=>Number(x.id));
+  const allowedSet=new Set(allowed);
+  const requested=Array.isArray(selectedJobIds)?[...new Set(selectedJobIds.map(Number).filter(x=>Number.isInteger(x)&&allowedSet.has(x)))]:[];
+  db.prepare('UPDATE jobs SET selected=0 WHERE run_id=? AND sendable=1 AND batch_no=?').run(runId,batch);
+  if(requested.length){
+    const placeholders=requested.map(()=>'?').join(',');
+    db.prepare(`UPDATE jobs SET selected=1 WHERE run_id=? AND batch_no=? AND sendable=1 AND id IN (${placeholders})`).run(runId,batch,...requested);
+  }
+  return {batch,selected:requested.length,total:allowed.length,requested};
+}
+
+app.post('/api/run/:id/selection',(req,res)=>{
+  const id=Number(req.params.id),run=getRun(id);
+  if(!run)return res.status(404).json({error:'Execução não encontrada'});
+  if(['APPLYING','RETRYING'].includes(run.status))return res.status(409).json({error:'Aguarde o processamento atual terminar antes de alterar a seleção.'});
+  const saved=persistRunSelection(id,req.body?.selectedJobIds);
+  res.json({ok:true,runId:id,...saved});
+});
+
 app.post('/api/run/:id/apply',(req,res)=>{
+  const id=Number(req.params.id),run=getRun(id);
+  if(!run)return res.status(404).json({error:'Execução não encontrada'});
+  if(['APPLYING','RETRYING'].includes(run.status))return res.status(409).json({error:'Já existe processamento em andamento.'});
+  const prefs=parseJson(run.filters_json,{});
+  if(prefs.autoSubmit&&req.body?.confirmLive!==true)return res.status(409).json({error:'Confirmação explícita do modo real é obrigatória.'});
+  const saved=persistRunSelection(id,req.body?.selectedJobIds);
+  if(saved.selected<1)return res.status(400).json({error:'Selecione pelo menos uma vaga para processar.'});
+  startBackground(id,false);
+  res.json({ok:true,runId:id,...saved});
+});
+
+app.post('/api/run/:id/retry',(req,res)=>{
   const id=Number(req.params.id),run=getRun(id); if(!run) return res.status(404).json({error:'Execução não encontrada'});
   const prefs=parseJson(run.filters_json,{});
-  if(prefs.autoSubmit&&req.body?.confirmLive!==true) return res.status(409).json({error:'Confirmação explícita do modo real é obrigatória.'});
-  startBackground(id,false); res.json({ok:true,runId:id});
-});
-app.post('/api/run/:id/retry',(req,res)=>{
-  const id=Number(req.params.id); if(!getRun(id)) return res.status(404).json({error:'Execução não encontrada'});
+  if(prefs.autoSubmit&&req.body?.confirmLive!==true)return res.status(409).json({error:'Confirmação explícita do modo real é obrigatória para a retentativa.'});
   startBackground(id,true); res.json({ok:true,runId:id});
 });
 app.post('/api/run/:id/batch/:batch',(req,res)=>{
@@ -482,14 +629,16 @@ app.get('/api/run/:id/status',(req,res)=>{
   const pool=db.prepare(`SELECT COUNT(*) poolTotal,COALESCE(SUM(sendable),0) sendableTotal,
     COALESCE(SUM(CASE WHEN blocked_reason IN ('LOGIN_REQUIRED','EMAIL_REQUIRED') THEN 1 ELSE 0 END),0) blockedLogin,
     COALESCE(SUM(CASE WHEN blocked_reason='EMAIL_REQUIRED' THEN 1 ELSE 0 END),0) blockedEmail,
-    COALESCE(SUM(CASE WHEN sendable=0 AND blocked_reason NOT IN ('LOGIN_REQUIRED','EMAIL_REQUIRED') THEN 1 ELSE 0 END),0) unverifiedLogin,
+    COALESCE(SUM(CASE WHEN blocked_reason='AI_REVIEW_PENDING' THEN 1 ELSE 0 END),0) aiReviewPending,
+    COALESCE(SUM(CASE WHEN blocked_reason='ALREADY_SENT' THEN 1 ELSE 0 END),0) alreadySentTotal,
+    COALESCE(SUM(CASE WHEN sendable=0 AND blocked_reason NOT IN ('LOGIN_REQUIRED','EMAIL_REQUIRED','AI_REVIEW_PENDING','ALREADY_SENT') THEN 1 ELSE 0 END),0) unverifiedLogin,
     COALESCE(SUM(CASE WHEN sendable=1 AND selected=0 THEN 1 ELSE 0 END),0) reserve,
     COALESCE(MAX(batch_no),0) batches FROM jobs WHERE run_id=?`).get(id);
-  res.json({runId:id,status:run.status,total,activeBatch:run.active_batch||1,...pool,counts:Object.fromEntries(counts.map(x=>[x.status,x.count]))});
+  res.json({runId:id,candidateId:run.candidate_id,resumeId:run.resume_id,status:run.status,total,activeBatch:run.active_batch||1,...pool,counts:Object.fromEntries(counts.map(x=>[x.status,x.count]))});
 });
 
 function reportRows(runId){
-  return db.prepare(`SELECT COALESCE(a.status,CASE WHEN j.blocked_reason='LOGIN_REQUIRED' THEN 'BLOQUEADA LOGIN' WHEN j.blocked_reason='EMAIL_REQUIRED' THEN 'BLOQUEADA EMAIL' WHEN j.sendable=0 THEN 'RESERVA NÃO VERIFICADA' WHEN j.selected=1 THEN 'PENDING' ELSE 'RESERVA' END) status,j.title,j.location,j.salary,j.url,j.score FROM jobs j
+  return db.prepare(`SELECT COALESCE(a.status,CASE WHEN j.blocked_reason='LOGIN_REQUIRED' THEN 'BLOQUEADA LOGIN' WHEN j.blocked_reason='EMAIL_REQUIRED' THEN 'BLOQUEADA EMAIL' WHEN j.blocked_reason='ALREADY_SENT' THEN 'ENVIADA ANTERIORMENTE' WHEN j.sendable=0 THEN 'RESERVA NÃO VERIFICADA' WHEN j.selected=1 THEN 'PENDING' ELSE 'RESERVA' END) status,j.title,j.location,j.salary,j.url,j.score FROM jobs j
     LEFT JOIN applications a ON a.job_id=j.id AND a.run_id=j.run_id WHERE j.run_id=? ORDER BY j.score DESC`).all(runId).map(x=>({
       Enviado:x.status==='SENT'?'SIM':x.status,
       'Nome da vaga':x.title,
@@ -534,9 +683,34 @@ app.get('/api/candidate/:id/export-latest.xlsx',async(req,res)=>{
   try{const id=Number(req.params.id),r=latestRun(id);if(!r) return res.status(404).json({error:'Nenhuma execução encontrada'});res.download(await saveXlsx(r.id));}
   catch(e){res.status(500).json({error:String(e.message||e)});}
 });
+app.delete('/api/candidate/:id/search-history',(req,res)=>{
+  const id=Number(req.params.id),candidate=getCandidate(id);
+  if(!candidate)return res.status(404).json({error:'Candidato não encontrado'});
+  const active=db.prepare("SELECT COUNT(*) n FROM runs WHERE candidate_id=? AND status IN ('APPLYING','RETRYING','PREPARING')").get(id).n||0;
+  if(active)return res.status(409).json({error:'Há uma execução em andamento. Aguarde terminar antes de excluir o histórico.'});
+  try{
+    const runs=db.prepare('SELECT id FROM runs WHERE candidate_id=?').all(id).map(x=>Number(x.id));
+    for(const runId of runs){
+      for(const x of db.prepare('SELECT tailored_file FROM applications WHERE run_id=?').all(runId)){
+        if(x.tailored_file)try{fs.rmSync(x.tailored_file,{force:true});}catch{}
+      }
+    }
+    if(runs.length){
+      const placeholders=runs.map(()=>'?').join(',');
+      db.prepare(`DELETE FROM applications WHERE run_id IN (${placeholders})`).run(...runs);
+      db.prepare(`DELETE FROM jobs WHERE run_id IN (${placeholders})`).run(...runs);
+      db.prepare(`DELETE FROM runs WHERE id IN (${placeholders})`).run(...runs);
+    }
+    db.prepare('DELETE FROM candidate_job_history WHERE candidate_id=?').run(id);
+    const dirs=ensureCandidateDirs(id);
+    for(const name of fs.readdirSync(dirs.reports))try{fs.rmSync(path.join(dirs.reports,name),{recursive:true,force:true});}catch{}
+    db.prepare('UPDATE candidates SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+    res.json({ok:true,candidateId:id,deletedRuns:runs.length});
+  }catch(e){res.status(500).json({error:String(e.message||e)});}
+});
+
 app.delete('/api/candidate/:id',async(req,res)=>{
   const id=Number(req.params.id),c=getCandidate(id);if(!c)return res.status(404).json({error:'Candidato não encontrado'});
-  try{await closeLoginSession(id);}catch{}
   db.prepare('DELETE FROM candidates WHERE id=?').run(id);
   fs.rmSync(candidateDir(id),{recursive:true,force:true});
   res.json({ok:true,id,name:c.name});
@@ -553,7 +727,6 @@ app.delete('/api/run/:id',(req,res)=>{
 
 app.post('/api/execution/delete',async(req,res)=>{
   try{
-    await closeLoginSession();
     db.close();
     res.json({ok:true,path:runtime.session,message:'Execução encerrada e pasta agendada para exclusão.'});
     setTimeout(()=>{try{fs.rmSync(runtime.session,{recursive:true,force:true});}finally{process.exit(0);}},600);
@@ -568,9 +741,59 @@ app.post('/api/reset',(req,res)=>{
   res.json({ok:true});
 });
 
+app.get('/api/backup/export',(req,res)=>{
+  try{
+    const backup=createPortableBackup();
+    res.download(path.resolve(backup.file),backup.name);
+  }catch(e){res.status(500).json({error:String(e?.message||e)});}
+});
+
+app.post('/api/backup/import',upload.single('backup'),(req,res)=>{
+  const uploaded=req.file?.path;
+  try{
+    if(!uploaded)return res.status(400).json({error:'Selecione um backup do LetsWork'});
+    const result=preparePortableRestore(uploaded);
+    res.json(result);
+  }catch(e){res.status(400).json({error:String(e?.message||e)});}
+  finally{if(uploaded)try{fs.rmSync(uploaded,{force:true});}catch{}}
+});
+
+app.get('/api/system/status',(req,res)=>{
+  try{
+    const dbFile=path.join(storage.data,'letswork.sqlite');
+    res.json({inventory:getRioVagasInventoryStatus(),sources:sourceRegistry(),database:{path:dbFile,bytes:fs.existsSync(dbFile)?fs.statSync(dbFile).size:0}});
+  }catch(e){res.status(500).json({error:String(e?.message||e)});}
+});
+
+app.get('/api/run/:id/metrics',(req,res)=>{
+  try{res.json(runMetrics(Number(req.params.id)));}catch(e){res.status(500).json({error:String(e?.message||e)});}
+});
+
+app.get('/api/run/:id/events',(req,res)=>{
+  try{
+    const rows=db.prepare('SELECT id,event_type,data_json,created_at FROM run_events WHERE run_id=? ORDER BY id').all(Number(req.params.id)).map(x=>({...x,data:parseJson(x.data_json,{})}));
+    res.json(rows);
+  }catch(e){res.status(500).json({error:String(e?.message||e)});}
+});
+
+async function runRioInventoryMaintenance(){
+  try{
+    const status=await maintainRioVagasInventory();
+    console.log(`[RioVagas] manutencao automatica: ${status.active||0} vagas ativas; ${status.fullSnapshot?'reconciliacao completa':'atualizacao incremental'}`);
+  }catch(e){
+    console.log('[RioVagas] manutencao automatica falhou:',String(e?.message||e));
+  }
+}
+
+app.get('/api/inventory/riovagas/status',(req,res)=>{
+  try{res.json(getRioVagasInventoryStatus());}catch(e){res.status(500).json({error:String(e?.message||e)});}
+});
+
 app.listen(PORT,'127.0.0.1',()=>{
   console.log(`LetsWork: http://127.0.0.1:${PORT}`);
   console.log(`PASTA DESTA EXECUÇÃO: ${runtime.session}`);
+  const startup=setTimeout(runRioInventoryMaintenance,1200); startup.unref?.();
+  const timer=setInterval(runRioInventoryMaintenance,60*60*1000); timer.unref?.();
 });
 
 app.get('/api/run/:id/applications',(req,res)=>{

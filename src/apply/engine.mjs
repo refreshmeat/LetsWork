@@ -1,11 +1,19 @@
-import { chromium } from 'playwright-core';
 import fs from 'fs';
 import path from 'path';
 import { runtime } from '../runtime.mjs';
 import { ensureCandidateDirs } from '../storage.mjs';
 import { askAI, parseJsonLoose } from '../services/ai.mjs';
 
-function playwrightChromiumPath(){
+let chromiumApi=null;
+async function getChromium(){
+  if(!chromiumApi){
+    const mod=await import('playwright-core');
+    chromiumApi=mod.chromium;
+  }
+  return chromiumApi;
+}
+async function playwrightChromiumPath(){
+  const chromium=await getChromium();
   const explicit=process.env.PLAYWRIGHT_CHROMIUM_PATH;
   if(explicit&&fs.existsSync(explicit))return explicit;
   try{
@@ -24,7 +32,8 @@ function playwrightChromiumPath(){
   throw new Error('Chromium do Playwright não encontrado. A candidatura foi bloqueada para não abrir navegador comum.');
 }
 export async function createApplicationBrowser(){
-  return chromium.launch({executablePath:playwrightChromiumPath(),headless:true,args:['--no-sandbox','--disable-gpu','--disable-background-networking','--disable-renderer-backgrounding']});
+  const chromium=await getChromium();
+  return chromium.launch({executablePath:await playwrightChromiumPath(),headless:true,args:['--no-sandbox','--disable-gpu','--disable-background-networking','--disable-renderer-backgrounding']});
 }
 export async function createApplicationContext(browser){
   const context=await browser.newContext();
@@ -46,7 +55,8 @@ export async function openLoginSession(candidateId=null){
   if(loginContext && loginCandidateId===candidateId) return {ok:true,alreadyOpen:true};
   if(loginContext) await closeLoginSession();
   const dir=profileDir(candidateId); loginCandidateId=candidateId;
-  loginContext=await chromium.launchPersistentContext(dir,{executablePath:playwrightChromiumPath(),headless:true,args:['--no-sandbox']});
+  const chromium=await getChromium();
+  loginContext=await chromium.launchPersistentContext(dir,{executablePath:await playwrightChromiumPath(),headless:true,args:['--no-sandbox']});
   const pages=loginContext.pages(); const first=pages[0] || await loginContext.newPage();
   await first.goto('https://portal.gupy.io/',{waitUntil:'domcontentloaded',timeout:30000}).catch(()=>{});
   const second=await loginContext.newPage();
@@ -83,6 +93,10 @@ function inferredNeighborhood(profile){
 }
 export function knownAnswer(label,profile,prefs,job=null){
   const q=norm(label),raw=String(profile.rawText||''),neighborhood=inferredNeighborhood(profile);
+  const saved=profile?.formAnswers&&typeof profile.formAnswers==='object'?profile.formAnswers:{};
+  for(const [savedQuestion,savedAnswer] of Object.entries(saved)){
+    if(norm(savedQuestion)===q&&savedAnswer!==undefined&&savedAnswer!==null&&String(savedAnswer).trim())return String(savedAnswer).trim();
+  }
   if(/nome/.test(q)) return profile.name||null;
   if(/e-?mail/.test(q)) return profile.email||null;
   if(/telefone|celular|whatsapp/.test(q)) return profile.phone||null;
@@ -96,18 +110,152 @@ export function knownAnswer(label,profile,prefs,job=null){
   if(/bairro/.test(q)&&neighborhood) return neighborhood;
   if(/endere[cç]o|logradouro/.test(q)&&profile.address) return profile.address;
   if(/pretens.*salar|salario/.test(q)) return prefs.salaryExpectation||'A combinar';
+  if(/(?:interesse|interessad).*(?:trabalhar|atuar)/.test(q)){
+    const target=(q.match(/(?:com|em|na area de|na área de)\s+(.+)$/i)?.[1]||'').trim();
+    const evidence=norm([raw,(profile.skills||[]).join(' '),prefs.area||'',prefs.searchFocus||'',...(prefs.searchCoreTerms||[]),...(prefs.searchFamilies||[]),job?.title||''].join(' '));
+    const tokens=norm(target).split(/[^a-z0-9+#]+/).filter(x=>x.length>=4&&!['trabalhar','atuar','interesse','interessado','interessada'].includes(x));
+    if(tokens.length&&tokens.some(x=>evidence.includes(x)))return 'Sim';
+  }
   if(/cidade|municipio/.test(q)&&(profile.residenceCity||prefs.city)) return profile.residenceCity||prefs.city;
   if(/estado|\buf\b/.test(q)&&(profile.residenceState||prefs.state)) return profile.residenceState||prefs.state;
   if(/linkedin/.test(q)&&profile.linkedin) return profile.linkedin;
   if(/instagram|@/.test(q)&&profile.instagram) return profile.instagram;
   if(/portfolio/.test(q)&&profile.portfolio) return profile.portfolio;
-  if(/semestre|periodo.*faculdade/.test(q)) return raw.match(/\b\d{1,2}\s*[º°o]?\s*semestre\b/i)?.[0]||null;
+  if(/semestre|periodo/.test(q)){ const m=raw.match(/\b(\d{1,2})\s*(?:º|°|o)?\s*(?:semestre|periodo)\b/i); if(m)return m[1]; }
   if(/curso|graduacao|faculdade|formacao/.test(q)) return lineMatch(raw,/bacharel|gradua|faculdade|universidade|curso superior/i);
   if(/ingles/.test(q)) return lineMatch(raw,/ingl[eê]s|english/i);
   if(/pcd|deficiencia/.test(q)) return profile.pcd===true?'Sim':profile.pcd===false?'Não':null;
   if(/contratacao.*pj|aceita.*pj/.test(q)) return (prefs.contractTypes||[]).includes('PJ')?'Sim':'Não';
-  if(/disponibilidade/.test(q)&&prefs.availability===true) return 'Sim';
+  if(/disponibilidade/.test(q)) return prefs.availability===false?'Não':prefs.availability===true?'Sim':null;
   return null;
+}
+
+
+function rawResumeLines(profile){
+  return String(profile?.rawText||'').replace(/\r/g,'').split('\n').map(x=>x.replace(/\s+/g,' ').trim()).filter(Boolean);
+}
+function experienceSectionLines(profile){
+  const lines=rawResumeLines(profile);
+  let start=lines.findIndex(x=>/^(?:experiencias? profissionais?|historico profissional|experiencias?)$/i.test(norm(x)));
+  if(start<0)return [];
+  const out=[];
+  for(let i=start+1;i<lines.length;i++){
+    const n=norm(lines[i]);
+    if(/^(?:formacao|formacoes|formacao academica|habilidades|skills|competencias|certificacoes|certificados|idiomas|informacoes adicionais|projetos|portfolio)$/.test(n))break;
+    out.push(lines[i]);
+  }
+  return out;
+}
+function experienceSummaryAnswer(profile){
+  const lines=experienceSectionLines(profile);
+  if(!lines.length)return null;
+  const dateRx=/(?:19|20)\d{2}\s*[–—-]\s*(?:(?:19|20)\d{2}|atual|presente)|\|\s*(?:19|20)\d{2}/i;
+  const groups=[];
+  let i=0;
+  while(i<lines.length&&groups.length<3){
+    const company=lines[i],role=lines[i+1]||'';
+    if(role&&dateRx.test(role)){
+      const duties=[];let j=i+2;
+      while(j<lines.length){
+        if(j+1<lines.length&&dateRx.test(lines[j+1]))break;
+        duties.push(lines[j]);j++;
+      }
+      groups.push(company+' — '+role+(duties[0]?': '+duties[0].replace(/[.;]+$/,''):''));
+      i=j;continue;
+    }
+    i++;
+  }
+  return groups.length?groups.join('; ').slice(0,900):lines.slice(0,7).join('; ').slice(0,900);
+}
+function contextForExperienceTerm(profile,terms){
+  const lines=rawResumeLines(profile),normalizedTerms=terms.map(norm).filter(Boolean);
+  for(let i=0;i<lines.length;i++){
+    const n=norm(lines[i]);
+    if(!normalizedTerms.some(t=>n.includes(t)))continue;
+    const prev=i>0?lines[i-1]:'';
+    const prev2=i>1?lines[i-2]:'';
+    const company=/\b(?:19|20)\d{2}\b/.test(prev)?prev2:prev;
+    return [company,lines[i]].filter(Boolean).join(' — ').slice(0,500);
+  }
+  return null;
+}
+function deterministicFormAnswer(question,options,profile,prefs,job){
+  const q=norm(question),raw=norm(String(profile?.rawText||'')),opts=(options||[]).map(String);
+  const yesNo=value=>{
+    const wanted=value?'sim':'nao';
+    return opts.find(x=>norm(x)===wanted)||opts.find(x=>norm(x).includes(wanted))||(value?'Sim':'Não');
+  };
+
+  if(/disponibilidade/.test(q)&&prefs?.availability!==undefined)return yesNo(prefs.availability!==false);
+
+  const lang=q.match(/\b(?:nivel\s+(?:de\s+)?)?(ingles|english|espanhol|spanish|frances|french|alemao|german)\b/);
+  if(lang){
+    const names={
+      ingles:['ingles','english'],english:['ingles','english'],
+      espanhol:['espanhol','spanish'],spanish:['espanhol','spanish'],
+      frances:['frances','french'],french:['frances','french'],
+      alemao:['alemao','german'],german:['alemao','german']
+    };
+    const aliases=names[lang[1]]||[lang[1]];
+    const lines=rawResumeLines(profile);
+    const line=lines.find(x=>aliases.some(a=>norm(x).includes(a)));
+    if(!line)return null;
+    const level=norm(line).match(/\b(basico|intermediario|avancado|fluente|nativo|a1|a2|b1|b2|c1|c2)\b/)?.[1];
+    if(level){
+      const pretty={basico:'Básico',intermediario:'Intermediário',avancado:'Avançado',fluente:'Fluente',nativo:'Nativo'}[level]||level.toUpperCase();
+      return opts.find(x=>norm(x)===level)||opts.find(x=>norm(x).includes(level))||pretty;
+    }
+    return line;
+  }
+
+  if(/mora\s+em|reside\s+em/.test(q)&&!/(?:que|qual|bairro)/.test(q)){
+    const match=q.match(/(?:mora|reside)\s+em\s+(.+?)(?:\?|$)/);
+    const target=match?.[1]?.replace(/\b(?:algum|alguma|um|uma|dos|das)\b/g,' ').replace(/\s+/g,' ').trim();
+    if(target){
+      const residence=norm([profile?.neighborhood,profile?.residenceCity,profile?.residenceState].filter(Boolean).join(' '));
+      const tokens=target.split(/[^a-z0-9]+/).filter(x=>x.length>=3&&!['rio','janeiro'].includes(x));
+      if(tokens.length)return yesNo(tokens.every(x=>residence.includes(x)));
+    }
+  }
+
+  if(/comente.*experien|fale.*experien|resuma.*experien|conte.*experien/.test(q)){
+    return experienceSummaryAnswer(profile);
+  }
+
+  if(/experien|vivencia|ja trabalhou|ja atuou|trabalhou em/.test(q)){
+    const typeQuestion=/em que tipo de empresa|qual empresa|onde trabalhou|onde teve experiencia/.test(q);
+    const domains=[
+      ['hotel',['hotel','hoteis','hotelaria']],
+      ['restaurante',['restaurante','restaurantes']],
+      ['loteria',['loteria','loterica']],
+      ['shopping',['shopping']],
+      ['caixa',['caixa']],
+      ['recepcao',['recepcao','recepcionista']],
+      ['atendimento',['atendimento','atendente']],
+      ['administrativo',['administrativo','administrativa']],
+      ['vendas',['vendas','vendedor','vendedora']]
+    ];
+    const mentioned=domains.filter(([key,aliases])=>aliases.some(a=>q.includes(norm(a))));
+    if(typeQuestion&&mentioned.length){
+      const evidence=contextForExperienceTerm(profile,mentioned.flatMap(([,aliases])=>aliases));
+      return evidence||null;
+    }
+    if(mentioned.length){
+      const evidenced=mentioned.some(([,aliases])=>aliases.some(a=>raw.includes(norm(a))));
+      return yesNo(evidenced);
+    }
+    if(/na funcao|nesta funcao|nessa funcao/.test(q)&&job?.title){
+      const role=norm(job.title);
+      const roleTerms=['caixa','recepcao','recepcionista','atendimento','atendente','administrativo','vendas'].filter(x=>role.includes(x));
+      if(roleTerms.length)return yesNo(roleTerms.some(x=>raw.includes(x)));
+    }
+    return yesNo(experienceSectionLines(profile).length>0);
+  }
+  return null;
+}
+function objectiveQuestionWithoutAI(question){
+  const q=norm(question);
+  return /nivel.*(?:ingles|english|espanhol|spanish|frances|french|alemao|german)|experien|vivencia|ja trabalhou|ja atuou|bairro|endereco|cep|cpf|nascimento|onde mora|onde reside|mora em|reside em|cnh|habilitacao|veiculo|carro|moto|trajeto|desloc|distancia|demora|minut|tempo.*(?:local|empresa|trabalho)|disponibilidade|semestre|periodo|curso|graduacao|faculdade|formacao|pretens.*salar|salario|whatsapp|telefone|celular/.test(q);
 }
 
 
@@ -130,7 +278,9 @@ async function geoPoint(query){
   return work;
 }
 async function travelEstimate(profile,prefs,job){
-  const origin=[profile.address,inferredNeighborhood(profile),profile.residenceCity||prefs.city,profile.residenceState||prefs.state,'Brasil'].filter(Boolean).join(', ');
+  const preciseOrigin=String(profile.address||'').trim()||inferredNeighborhood(profile);
+  if(!preciseOrigin)return null;
+  const origin=[preciseOrigin,profile.residenceCity||prefs.city,profile.residenceState||prefs.state,'Brasil'].filter(Boolean).join(', ');
   const dest=[job?.location,prefs.city,prefs.state,'Brasil'].filter(Boolean).join(', ');
   if(!origin||!job?.location)return null;
   const key='r:'+norm(origin)+'>'+norm(dest); if(travelCache.has(key))return travelCache.get(key);
@@ -143,8 +293,21 @@ async function travelEstimate(profile,prefs,job){
     const out={minutes,km,near:minutes<=45,origin,destination:dest}; travelCache.set(key,out); return out;
   }catch{return null;}
 }
-function safeFallbackAnswer(question,options=[],profile={},prefs={},job=null){
+export function safeFallbackAnswer(question,options=[],profile={},prefs={},job=null){
   const q=norm(question), opts=(options||[]).map(String).filter(Boolean);
+  // Never fabricate personal location, identity, transport or possessions.
+  if(/bairro|endere[cç]o|logradouro|\bcep\b|\bcpf\b|nascimento|onde mora|onde reside|resid[eê]ncia/.test(q))return null;
+  if(/proxim|perto|facil acesso|f[aá]cil acesso|distancia|desloc|trajeto|locomo[cç][aã]o|tempo.*(?:local|empresa|trabalho)|onibus|ônibus|brt|metr[oô]|transporte/.test(q))return null;
+  if(/cnh|habilita[cç][aã]o|moto propria|carro proprio|veiculo proprio/.test(q))return null;
+  if(/tiktok|instagram|linkedin|@|rede social|portfolio|portifolio/.test(q)){
+    const known=knownAnswer(question,profile,prefs,job);
+    if(known)return known;
+    if(/se tiver|se houver|caso tenha|opcional/.test(q))return 'Não possuo';
+    return null;
+  }
+  if(/curso.*(?:turno|periodo|previsao)|turno.*curso|previsao.*conclusao/.test(q))return null;
+  if(/concorda.*rpa|contrata[cç][aã]o.*rpa/.test(q))return null;
+  if(/entrevista.*(?:dia|data|hora)|disponibilidade.*entrevista.*\d/.test(q))return null;
   if(/experien|vivencia|ja trabalhou|ja atuou|possui experiencia|tem experiencia/.test(q)){
     if(opts.length){const no=opts.find(x=>/^(nao|não)$/i.test(x.trim())||/nao possuo|não possuo/i.test(x));if(no)return no;}
     return 'Não';
@@ -152,17 +315,18 @@ function safeFallbackAnswer(question,options=[],profile={},prefs={},job=null){
   if(/disponibilidade/.test(q)) return prefs.availability===false?'Não':'Sim';
   if(/pretens.*salar|salario/.test(q)) return prefs.salaryExpectation||'A combinar';
   if(/motiva|porque.*vaga|por que.*vaga|interesse.*vaga/.test(q)) return `Tenho interesse na oportunidade de ${job?.title||'trabalho'} por ser compatível com minha formação, conhecimentos e objetivos profissionais descritos no currículo.`;
-  if(/apresent|fale sobre voce|conte sobre voce|resumo profissional/.test(q)) return `Sou ${String(profile.rawText||'').match(/(?:estudante|cursando|graduand[oa])[^.\n]{0,100}/i)?.[0]||'candidato(a) em desenvolvimento profissional'}, com foco nas competências e projetos apresentados no currículo.`;
+  if(/apresent|fale sobre voce|conte sobre voce|resumo profissional/.test(q)) return 'Meu currículo apresenta minha formação, experiências e competências comprovadas relacionadas à oportunidade.';
   if(opts.length){
     const safe=opts.find(x=>/não se aplica|nao se aplica|sem experi|a combinar|^0$|^(nao|não)$/i.test(x.trim())); if(safe)return safe;
     return null;
   }
-  return 'Não informado no currículo';
+  return null;
 }
-
 export async function aiAnswers(questions,profile,prefs,job=null){
   if(!questions.length)return new Map();
-  const needsTravel=questions.some(q=>/(proxim|perto|distancia|desloc|trajeto|demora|minut|tempo.*(?:local|vaga|trabalho))/i.test(norm(q?.question||'')));
+  const formAiEnabled=process.env.LETSWORK_FORM_AI==='1';
+  const travelEnabled=process.env.LETSWORK_TRAVEL_ESTIMATE==='1';
+  const needsTravel=travelEnabled&&questions.some(q=>/(proxim|perto|distancia|desloc|trajeto|demora|minut|tempo.*(?:local|vaga|trabalho))/i.test(norm(q?.question||'')));
   const travel=needsTravel?await travelEstimate(profile,prefs,job).catch(()=>null):null;
   const out=new Map(),remaining=[];
   const raw=norm(String(profile.rawText||'')+' '+(profile.skills||[]).join(' '));
@@ -170,7 +334,9 @@ export async function aiAnswers(questions,profile,prefs,job=null){
   const knownTools=['canva','photoshop','figma','indesign','illustrator','illustration','excel','power bi','after effects','premiere','corel','autocad','sketchup','word','wordpress','html','css','javascript','python'];
   for(const q of questions){
     const id=String(q?.id??''),label=String(q?.question||''),n=norm(label),options=(q?.options||[]).map(String);
-    let answer=knownAnswer(label,profile,prefs,job)||null;
+    let answer=knownAnswer(label,profile,prefs,job)||deterministicFormAnswer(label,options,profile,prefs,job)||null;
+    const requiresConfirmedPersonalData=/bairro|endere[cç]o|logradouro|\bcep\b|\bcpf\b|nascimento|onde mora|onde reside|resid[eê]ncia|cnh|habilita[cç][aã]o|moto propria|carro proprio|veiculo proprio/.test(n);
+    const requiresPreciseTravel=/proxim|perto|facil acesso|f[aá]cil acesso|distancia|desloc|trajeto|locomo[cç][aã]o|tempo.*(?:local|empresa|trabalho)|onibus|ônibus|brt|metr[oô]|transporte/.test(n);
     if(!answer&&travel&&/(proxim|perto|distancia|desloc|trajeto|demora|minut|tempo)/.test(n)){
       if(/proxim|perto|mora.*local|reside.*local/.test(n)){
         const wanted=travel.near?'sim':'nao';
@@ -195,14 +361,16 @@ export async function aiAnswers(questions,profile,prefs,job=null){
     if(!answer&&/disponibilidade/.test(n))answer=prefs.availability===false?'Não':'Sim';
     if(!answer&&/(motiva|porque.*vaga|por que.*vaga|interesse.*vaga)/.test(n))answer=safeFallbackAnswer(label,options,profile,prefs,job);
     if(!answer&&/(apresent|fale sobre voce|conte sobre voce|resumo profissional)/.test(n))answer=safeFallbackAnswer(label,options,profile,prefs,job);
-    if(answer)out.set(id,String(answer));else remaining.push(q);
+    if(answer)out.set(id,String(answer));
+    else if(requiresConfirmedPersonalData||requiresPreciseTravel||objectiveQuestionWithoutAI(label)){}
+    else remaining.push(q);
   }
-  if(remaining.length){
+  if(remaining.length&&formAiEnabled){
     const system='Responda perguntas de formulário de candidatura usando somente fatos do currículo, dados confirmados da pessoa candidata, preferências e informações da vaga. Nunca invente experiência, habilidade, formação, endereço, disponibilidade ou credenciais. Se uma experiência ou habilidade não estiver comprovada, responda negativamente. Para opções, devolva exatamente uma opção existente. Para perguntas abertas, redija resposta curta e profissional baseada somente nos fatos fornecidos. Retorne apenas JSON válido.';
     const facts={curriculo:String(profile.rawText||'').slice(0,12000),dadosAdicionais:String(profile.additionalFacts||'').slice(0,3000),origemBairro:inferredNeighborhood(profile)||'',deslocamento:travel||null,vaga:{titulo:job?.title||'',empresa:job?.company||'',local:job?.location||'',descricao:String(job?.description||'').slice(0,7000)},preferencias:{availability:prefs.availability,contractTypes:prefs.contractTypes,pcdMode:prefs.pcdMode,salaryExpectation:prefs.salaryExpectation,city:prefs.city,state:prefs.state}};
     const prompt='CONTEXTO:\n'+JSON.stringify(facts)+'\n\nPERGUNTAS:\n'+JSON.stringify(remaining)+'\n\nRetorne exatamente {"answers":[{"id":"...","answer":"..."}]}. Responda todas. Não use null. Se faltar comprovação de experiência, responda de forma negativa e verdadeira, sem inventar.';
     try{
-      const parsed=parseJsonLoose(await askAI(system,prompt,{candidateId:profile.candidateId}))||{};
+      const parsed=parseJsonLoose(await askAI(system,prompt,{candidateId:profile.candidateId,timeoutMs:12000,maxAttempts:1,numCtx:4096,numPredict:360,temperature:0.1}))||{};
       for(const item of Array.isArray(parsed.answers)?parsed.answers:[]){
         const id=String(item?.id??''),answer=item?.answer==null?'':String(item.answer).trim();if(answer)out.set(id,answer);
       }
@@ -215,9 +383,32 @@ async function fieldLabel(el){
   return el.evaluate(e=>{
     const id=e.id; const explicit=id?document.querySelector(`label[for="${CSS.escape(id)}"]`):null;
     const wrap=e.closest('label,fieldset,.form-group,.field,.question,div');
-    return [explicit?.innerText,wrap?.innerText,e.getAttribute('placeholder'),e.getAttribute('name'),e.getAttribute('aria-label')]
+    return [explicit?.innerText,e.getAttribute('aria-label'),e.getAttribute('placeholder'),e.getAttribute('name'),e.id,wrap?.innerText]
       .filter(Boolean).join(' ').replace(/\s+/g,' ').trim().slice(0,900);
   });
+}
+function structuralTextAnswer(meta,profile,prefs,{separateSurname=false}={}){
+  const type=norm(meta?.type||''),name=norm(meta?.name||''),id=norm(meta?.id||''),ac=norm(meta?.autocomplete||'');
+  const key=[name,id,ac].filter(Boolean).join(' ');
+  const parts=String(profile?.name||'').trim().split(/\s+/).filter(Boolean);
+  const first=parts[0]||'', last=parts.length>1?parts.slice(1).join(' '):first;
+  if(type==='email'||/(^|\b)(email|e-mail)(\b|$)/.test(key))return profile?.email||null;
+  if(type==='tel'||/(telefone|celular|whatsapp|phone|mobile|tel)/.test(key))return profile?.phone||null;
+  if(/sobrenome|last.?name|family.?name|surname/.test(key))return last||null;
+  if(/first.?name|given.?name|primeiro.?nome/.test(key))return first||null;
+  if(separateSurname&&/^(?:nome|name|first_name)$/.test(name||id))return first||null;
+  if(/^(?:nome_completo|full_name|fullname)$/.test(name||id))return profile?.name||null;
+  if(/cidade[_ -]?estado|city[_ -]?state|cidadeestado/.test(key)){
+    const city=profile?.residenceCity||prefs?.city||'',state=profile?.residenceState||prefs?.state||'';
+    return [city,state].filter(Boolean).join(' - ')||null;
+  }
+  if(/(^|\b)(cidade|city|municipio)(\b|$)/.test(key))return profile?.residenceCity||prefs?.city||null;
+  if(/(^|\b)(estado|state|uf)(\b|$)/.test(key))return profile?.residenceState||prefs?.state||null;
+  if(/(^|\b)cpf(\b|$)/.test(key))return profile?.cpf||null;
+  if(/nascimento|birth/.test(key))return profile?.birthDate||null;
+  if(/(^|\b)cep(\b|$)|postal/.test(key))return profile?.cep||null;
+  if(/endereco|address|logradouro/.test(key))return profile?.address||null;
+  return null;
 }
 
 async function collectGenericAiAnswers(page,profile,prefs,job){
@@ -266,13 +457,16 @@ async function collectGenericAiAnswers(page,profile,prefs,job){
 
 async function fillTextFields(page,profile,prefs,aiMap=new Map(),job=null){
   const fields=page.locator('input:visible, textarea:visible'); const unknown=[];
+  const separateSurname=(await page.locator('input[name*="sobrenome" i],input[id*="sobrenome" i],input[name*="last_name" i],input[autocomplete="family-name"]').count().catch(()=>0))>0;
   for(let i=0;i<await fields.count();i++){
     const el=fields.nth(i), type=(await el.getAttribute('type')||'text').toLowerCase();
     if(['hidden','submit','button','file','checkbox','radio','password'].includes(type)) continue;
     if(await el.isDisabled().catch(()=>false)) continue;
     const required=(await el.getAttribute('required'))!==null || (await el.getAttribute('aria-required'))==='true';
     if((await el.inputValue().catch(()=>''))?.trim()) continue;
-    const label=await fieldLabel(el); let answer=knownAnswer(label,profile,prefs,job)||aiMap.get(norm(label))||null;
+    const meta=await el.evaluate(e=>({type:e.getAttribute('type')||'text',name:e.getAttribute('name')||'',id:e.id||'',autocomplete:e.getAttribute('autocomplete')||''}));
+    const label=await fieldLabel(el);
+    let answer=structuralTextAnswer(meta,profile,prefs,{separateSurname})||knownAnswer(label,profile,prefs,job)||aiMap.get(norm(label))||null;
     if(!answer&&required)answer=safeFallbackAnswer(label,[],profile,prefs,job);
     if(answer) await el.fill(String(answer)).catch(()=>{});
     else if(required) unknown.push(label||`campo ${i+1}`);
@@ -477,7 +671,7 @@ async function fillRioQuestions(page,job,profile,prefs){
     let options=[];
     if(tag==='SELECT') options=await first.locator('option').evaluateAll(os=>os.filter(o=>o.value).map(o=>(o.textContent||'').trim()));
     else if(type==='radio') options=await fields.evaluateAll(es=>es.map(e=>({value:e.value,text:(e.parentElement?.innerText||e.value||'').trim()})));
-    rows.push({id,question:q.question||`pergunta ${id}`,fields,first,tag,type,options,answer:knownAnswer(q.question,profile,prefs,job)});
+    rows.push({id,question:q.question||`pergunta ${id}`,fields,first,tag,type,options,answer:knownAnswer(q.question,profile,prefs,job)||deterministicFormAnswer(q.question,options.map?.(o=>typeof o==='string'?o:(o.text||o.value))||[],profile,prefs,job)});
   }
   const unresolved=rows.filter(x=>!x.answer).map(x=>({id:x.id,question:x.question,options:x.options.map?.(o=>typeof o==='string'?o:(o.text||o.value))||[]}));
   if(unresolved.length){
@@ -514,16 +708,28 @@ function tagAttr(tag,name){
   const m=String(tag||'').match(new RegExp('\\b'+name+'\\s*=\\s*(["\\\'])(.*?)\\1','i'));
   return m?htmlDecode(m[2]):'';
 }
+async function fetchRioGet(url,{timeout=10000,attempts=3}={}){
+  let lastError=null;
+  for(let attempt=1;attempt<=attempts;attempt++){
+    try{
+      const r=await fetch(url,{headers:{'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36','accept-language':'pt-BR,pt;q=0.9'},signal:AbortSignal.timeout(timeout)});
+      if(r.ok||(![408,425,429,500,502,503,504].includes(r.status)))return r;
+      lastError=new Error('RioVagas GET respondeu HTTP '+r.status);
+    }catch(e){lastError=e;}
+    if(attempt<attempts)await new Promise(resolve=>setTimeout(resolve,350*attempt));
+  }
+  throw lastError||new Error('RioVagas GET falhou');
+}
 async function resolveRioApplyForm(job){
   let applyUrl=/\/enviar-curriculo-gratis\//i.test(String(job.url||''))?String(job.url):'';
   if(!applyUrl){
-    const r=await fetch(job.url,{headers:{'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36','accept-language':'pt-BR,pt;q=0.9'},signal:AbortSignal.timeout(10000)});
+    const r=await fetchRioGet(job.url,{timeout:10000,attempts:3});
     const html=await r.text();
     const m=html.match(/href=["']([^"']*enviar-curriculo-gratis\/?\?vaga=[^"'#]+)["']/i);
     if(!m?.[1])throw new Error('RioVagas: link de candidatura não encontrado na vaga');
     applyUrl=new URL(htmlDecode(m[1]),r.url||job.url).toString();
   }
-  const r=await fetch(applyUrl,{headers:{'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36','accept-language':'pt-BR,pt;q=0.9'},signal:AbortSignal.timeout(10000)});
+  const r=await fetchRioGet(applyUrl,{timeout:10000,attempts:3});
   const html=await r.text();
   if(!r.ok)throw new Error('RioVagas: formulário respondeu HTTP '+r.status);
   const tags=[...html.matchAll(/<input\b[^>]*>/gi)].map(x=>x[0]);
@@ -551,7 +757,7 @@ async function applyRioVagasHttp(job,resumeFile,profile,prefs,dryRun){
   const resolved=[];
   for(const q of questions){
     const answer=answers.get(String(q.id))||safeFallbackAnswer(q.question,q.options,profile,prefs,job);
-    if(!answer)return {status:'ERROR',error:'RioVagas: pergunta sem resposta segura: '+q.question};
+    if(!answer)return {status:'NEEDS_DATA',error:'Campos obrigatórios sem dado confirmado: '+q.question};
     let value=String(answer);
     if(q.options.length){
       const exact=q.options.find(x=>norm(x)===norm(value))||q.options.find(x=>norm(x).includes(norm(value))||norm(value).includes(norm(x)));
@@ -584,12 +790,13 @@ async function applyRioVagasHttp(job,resumeFile,profile,prefs,dryRun){
   try{
     r=await fetch(form.applyUrl,{method:'POST',headers:{'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36','accept-language':'pt-BR,pt;q=0.9','referer':form.applyUrl},body:data,redirect:'follow',signal:AbortSignal.timeout(25000)});
     body=await r.text();
-  }catch(e){return {status:'ERROR',error:'RioVagas: falha no POST: '+String(e?.message||e)};}
+  }catch(e){return {status:'UNCERTAIN',error:'RioVagas: POST executado sem confirmação segura: '+String(e?.message||e)};}
   const normalized=norm(body+' '+(r?.url||''));
   if(/ja\s+(?:se\s+)?candidat|candidatura\s+ja\s+(?:foi\s+)?realizada|candidatura\s+ja\s+enviada|curriculo\s+ja\s+(?:foi\s+)?enviado|ja\s+enviou\s+(?:seu\s+)?curriculo|candidato\s+ja\s+cadastrado/.test(normalized))return {status:'ALREADY_APPLIED',error:'Candidatura já registrada anteriormente no RioVagas'};
   if(/curriculo enviado com sucesso|curriculo recebido|candidatura enviada|candidatura realizada|candidatura concluida|obrigado por se candidatar|obrigado pelo envio|recebemos (?:seu|o) curriculo|envio realizado com sucesso|mensagem de confirmacao/.test(normalized))return {status:'SENT',error:''};
   const errors=[...body.matchAll(/<(?:div|span|p)[^>]*class=["'][^"']*(?:error|invalid|danger)[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|span|p)>/gi)].map(x=>htmlDecode(x[1].replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim())).filter(Boolean).slice(0,5);
-  return {status:'ERROR',error:'RioVagas não confirmou o envio. HTTP '+r.status+(errors.length?' · '+errors.join(' | '):'')};
+  if(errors.length)return {status:'ERROR',error:'RioVagas recusou o envio. HTTP '+r.status+' · '+errors.join(' | ')};
+  return {status:'UNCERTAIN',error:'RioVagas respondeu ao POST, mas não confirmou o envio com segurança. HTTP '+r.status};
 }
 
 async function applyRioVagas(page,job,resumeFile,profile,prefs,dryRun,onProgress=null){
@@ -664,7 +871,30 @@ async function applyRioVagas(page,job,resumeFile,profile,prefs,dryRun,onProgress
   if(invalidAfter.length)return {status:'ERROR',error:'RioVagas recusou campos do formulário: '+invalidAfter.join(' | ')};
   const formStillVisible=await page.locator('form.form-candidato:visible').count().catch(()=>0);
   if(post?.ok()&&!formStillVisible)return {status:'SENT',error:''};
-  return {status:'ERROR',error:`RioVagas não confirmou o envio com segurança. HTTP: ${post?.status?.()||'sem POST'} · URL: ${finalUrl.slice(0,180)}`};
+  return {status:'UNCERTAIN',error:`RioVagas acionou o envio, mas não houve confirmação segura. HTTP: ${post?.status?.()||'sem POST'} · URL: ${finalUrl.slice(0,180)}`};
+}
+async function handleSiteSpecificWidgets(page,profile,prefs){
+  const host=(()=>{try{return new URL(page.url()).hostname.toLowerCase()}catch{return ''}})();
+  if(!/beavagas\.com\.br$/.test(host))return;
+  const input=page.locator('#cidade_estado:visible').first();
+  if(!await input.count())return;
+  const city=String(profile?.residenceCity||prefs?.city||'').trim();
+  const state=String(profile?.residenceState||prefs?.state||'').trim();
+  if(!city)return;
+  await input.click({force:true}).catch(()=>{});
+  await input.fill(city).catch(()=>{});
+  await page.waitForTimeout(450);
+  const suggestions=page.locator('#cidade_suggestions .suggestion-item:visible');
+  const count=await suggestions.count();
+  if(!count)return;
+  let pick=suggestions.first();
+  const wanted=(city+(state?' - '+state:'')).trim().toLowerCase();
+  for(let i=0;i<count;i++){
+    const text=String(await suggestions.nth(i).innerText().catch(()=>'')).trim().toLowerCase();
+    if(text===wanted){pick=suggestions.nth(i);break;}
+  }
+  await pick.click({force:true}).catch(()=>{});
+  await page.waitForTimeout(250);
 }
 async function applyGeneric(page,job,resumeFile,profile,prefs,dryRun,onProgress=null){
   const firstBody=await page.locator('body').innerText().catch(()=>'');
@@ -678,7 +908,8 @@ async function applyGeneric(page,job,resumeFile,profile,prefs,dryRun,onProgress=
     stepUnknown.push(...await chooseRadios(page,profile,prefs,aiMap,job));
     stepUnknown.push(...await chooseCheckboxes(page,profile,prefs,aiMap,job));
     await uploadResume(page,resumeFile,profile);
-    if(stepUnknown.length)return {status:'ERROR',error:'Campos obrigatórios sem resposta segura: '+[...new Set(stepUnknown.filter(Boolean))].join(' | ')};
+    await handleSiteSpecificWidgets(page,profile,prefs);
+    if(stepUnknown.length)return {status:'ERROR',error:'Campos obrigat├│rios sem resposta segura: '+[...new Set(stepUnknown.filter(Boolean))].join(' | ')};
     const next=page.getByRole('button',{name:/pr[oó]ximo|prosseguir|continuar|avan[cç]ar|next/i}).first();
     if(!await next.count())break;
     await next.click().catch(()=>{});
@@ -717,11 +948,11 @@ async function applyGeneric(page,job,resumeFile,profile,prefs,dryRun,onProgress=
   if(invalidAfter.length)return {status:'ERROR',error:'Site recusou campos do formulário: '+invalidAfter.join(' | ')};
   const afterForms=await page.locator('form:visible').count().catch(()=>0);
   if(post?.ok()&&beforeForms>0&&afterForms===0)return {status:'SENT',error:''};
-  return {status:'ERROR',error:'Envio acionado, mas o site não forneceu confirmação segura'};
+  return {status:'UNCERTAIN',error:'Envio acionado, mas o site não forneceu confirmação segura'};
 }
 export async function applyToJob(job,resumeFile,profile,prefs,{dryRun=true,prepareResume=null,browser:sharedBrowser=null,context:sharedContext=null}={}){
   if(!fs.existsSync(resumeFile)) return {status:'ERROR',error:'Currículo personalizado não encontrado'};
-  const directRio=job.source==='RioVagas'||/riovagas\\.com\\.br/i.test(String(job.url||''));
+  const directRio=job.source==='RioVagas'||/riovagas\.com\.br/i.test(String(job.url||''));
   if(directRio&&!prepareResume)return applyRioVagasHttp(job,resumeFile,profile,resolvedPrefs(job,prefs),dryRun);
   let browser=sharedBrowser,context=sharedContext||null,page=null,ownsContext=false,ownsBrowser=false;
   const effectivePrefs=resolvedPrefs(job,prefs);

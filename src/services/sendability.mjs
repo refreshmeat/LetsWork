@@ -90,7 +90,6 @@ async function followApplication(url,depth=0){
     const links=extractApplyLinks(page.html,page.url).filter(x=>x!==page.url);
     if(links.length)return followApplication(links[0],depth+1);
   }
-  if(applyPathRx.test(page.url))return {sendable:1,reason:''};
   return {sendable:0,reason:'UNVERIFIED_LOGIN'};
 }function obviousListingJob(job){
   const url=String(job?.url||''),source=String(job?.source||'');
@@ -106,6 +105,9 @@ export function initialSendability(job){
   if(job?.requiresLogin===true&&source==='LinkedIn')return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false};
   if(job?.requiresLogin===true)return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};
   if(source==='RioVagas'||/riovagas\.com\.br\/riovagas\//i.test(url))return {sendable:1,reason:'',verified:true,httpReady:true};
+  if(source==='Huanna'||/huanna\.com\.br\/vagas\//i.test(url))return {sendable:1,reason:'',verified:true,httpReady:false};
+  if(source==='BeaVagas'||/beavagas\.com\.br\/vagas\/p\//i.test(url))return {sendable:1,reason:'',verified:true,httpReady:false};
+  if(/^(?:LinkedIn|InfoJobs|Catho|Gupy|Vagas\.com|Trabalha Brasil)$/i.test(source))return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};
   return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false};
 }
 export async function probeJobSendability(job){
@@ -182,7 +184,7 @@ export async function classifyJobsForQueue(jobs,{batchSize=500,probeLimit=1800}=
     const groups=new Map();
     for(const job of pending){const source=job.source||'Outra';if(!groups.has(source))groups.set(source,[]);groups.get(source).push(job);}
     await Promise.all([...groups.entries()].map(([source,rows])=>{
-      const workers=source==='Vagas.com'?1:source==='Gupy'?3:source==='LinkedIn'?5:4;
+      const workers=source==='Vagas.com'?1:source==='BeaVagas'?1:source==='Gupy'?3:source==='LinkedIn'?5:4;
       return runGroup(rows,workers);
     }));
     for(const j of pending){delete j._probing;j._sendabilityChecked=true;}

@@ -8,7 +8,8 @@ export const storage = {
   data: path.join(ROOT,'data'),
   candidates: path.join(ROOT,'candidatos'),
   temp: path.join(ROOT,'temp'),
-  logs: path.join(ROOT,'logs')
+  logs: path.join(ROOT,'logs'),
+  backups: path.join(ROOT,'backups')
 };
 for (const dir of Object.values(storage)) fs.mkdirSync(dir,{recursive:true});
 
@@ -22,8 +23,7 @@ export function ensureCandidateDirs(id) {
     resumes:path.join(base,'curriculos'),
     documents:path.join(base,'documentos'),
     generated:path.join(base,'curriculos_personalizados'),
-    reports:path.join(base,'relatorios'),
-    sessions:path.join(base,'sessoes_navegador')
+    reports:path.join(base,'relatorios')
   };
   for(const dir of Object.values(dirs)) fs.mkdirSync(dir,{recursive:true});
   return dirs;

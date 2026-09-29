@@ -12,7 +12,31 @@ const imageExt=new Set(['.png','.jpg','.jpeg','.webp','.bmp','.tif','.tiff']);
 const textExt=new Set(['.txt','.md','.csv','.json','.xml','.html','.htm']);
 const wordExt=new Set(['.doc','.rtf','.odt']);
 const preferredZipExt=['.docx','.pdf','.doc','.rtf','.odt','.txt','.png','.jpg','.jpeg'];
-const ignoredNameWords=/curr[ií]culo|curriculum|perfil|contato|forma[cç][aã]o|experi[eê]ncia|habilidades|compet[eê]ncias/i;
+const asciiText=value=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+const ignoredNameWords=/\b(?:curriculo|curriculum|perfil|contato|formacao|experiencia|habilidades|competencias)\b/i;
+
+function mojibakeScore(value){
+  const s=String(value||'');
+  const patterns=[/Ã./g,/Â./g,/â[\u0080-\u00bf]{1,3}/g,/ð[\u0080-\u00bf]{1,3}/g,/ƒ\?/g,/Ç[\u0080-\u00ff]/g,/\uFFFD/g];
+  return patterns.reduce((sum,rx)=>sum+(s.match(rx)||[]).length,0);
+}
+export function repairTextEncoding(value){
+  let current=String(value||'');
+  for(let i=0;i<3;i++){
+    if(!/[ÃÂâðƒÇ]/.test(current))break;
+    const next=Buffer.from(current,'latin1').toString('utf8');
+    if(!next||next.includes('\uFFFD'))break;
+    if(mojibakeScore(next)>=mojibakeScore(current))break;
+    current=next;
+  }
+  return current
+    .replace(/\u00a0/g,' ')
+    .replace(/\r/g,'')
+    .replace(/[ \t]+/g,' ')
+    .replace(/\n{3,}/g,'\n\n')
+    .trim();
+}
+
 
 async function withOcrWorker(fn){
   let worker;
@@ -36,8 +60,8 @@ function pageTextLines(content){
   if(clean.replace(/\s/g,'').length<80)return true;
   const tokens=clean.split(/\s+/).filter(Boolean);
   if(tokens.length<12)return true;
-  const singles=tokens.filter(x=>/^[A-Za-zÀ-ÿ]$/.test(x)).length;
-  const normal=tokens.filter(x=>/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9.,;:/()#+-]{2,}$/.test(x)).length;
+  const singles=tokens.filter(x=>/^\p{L}$/u.test(x)).length;
+  const normal=tokens.filter(x=>/^\p{L}[\p{L}\p{N}.,;:/()#+-]{2,}$/u.test(x)).length;
   const singleRatio=singles/Math.max(1,tokens.length);
   const normalRatio=normal/Math.max(1,tokens.length);
   return singleRatio>0.22 || normalRatio<0.32;
@@ -50,7 +74,7 @@ async function readPdf(file){
     const page=await doc.getPage(i);
     pages.push(pageTextLines(await page.getTextContent()));
   }
-  const text=pages.join('\n').trim();
+  const text=repairTextEncoding(pages.join('\n'));
   if(!poorPdfText(text)) return text;
   return withOcrWorker(async worker=>{
     const chunks=[];
@@ -63,7 +87,7 @@ async function readPdf(file){
       chunks.push(recognized);
     }
     const ocr=chunks.join('\n').trim();
-    return ocr.replace(/\r/g,'').replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+    return repairTextEncoding(ocr);
   });
 }
 
@@ -92,11 +116,11 @@ async function readWordLegacy(file){
 export async function extractText(file){
   const ext=path.extname(file).toLowerCase();
   if(ext==='.pdf') return readPdf(file);
-  if(ext==='.docx') return (await mammoth.extractRawText({path:file})).value;
+  if(ext==='.docx') return repairTextEncoding((await mammoth.extractRawText({path:file})).value);
   if(wordExt.has(ext)) return readWordLegacy(file);
   if(ext==='.zip') return extractZip(file);
-  if(imageExt.has(ext)) return ocrImage(file);
-  if(textExt.has(ext)) return fs.readFileSync(file,'utf8');
+  if(imageExt.has(ext)) return repairTextEncoding(await ocrImage(file));
+  if(textExt.has(ext)) return repairTextEncoding(fs.readFileSync(file,'utf8'));
   return '';
 }
 
@@ -120,42 +144,65 @@ export function extractPreferredResumeFromZip(file,destDir){
 
 function guessName(text){
   const lines=String(text||'').split(/\r?\n/).map(x=>x.replace(/\s+/g,' ').trim()).filter(Boolean);
-  const byLine=lines.find(x=>x.length>=5&&x.length<=80&&!x.includes('@')&&!ignoredNameWords.test(x)&&/^[A-Za-zÀ-ÿ' -]+$/.test(x));
-  if(byLine) return byLine;
-  const head=String(text||'').slice(0,260);
-  const upper=head.match(/\b([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ]{2,}(?:\s+(?:DA|DE|DO|DAS|DOS|E|[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ]{2,})){1,6})\b/);
+  const byLine=lines.find(x=>{
+    const parts=x.split(/\s+/).filter(Boolean);
+    return x.length>=5&&x.length<=80&&parts.length>=2&&parts.length<=7&&!x.includes('@')&&!ignoredNameWords.test(asciiText(x))&&/^[\p{L}' -]+$/u.test(x);
+  });
+  if(byLine)return byLine;
+  const head=String(text||'').slice(0,320);
+  const upper=head.match(/\b(\p{Lu}{2,}(?:\s+(?:DA|DE|DO|DAS|DOS|E|\p{Lu}{2,})){1,6})\b/u);
   return upper?.[1]||'';
 }
 
 export function inferProfile(text){
-  const raw=String(text||'');
+  const raw=repairTextEncoding(text);
   const lines=raw.split(/\r?\n/).map(x=>x.replace(/\s+/g,' ').trim()).filter(Boolean);
   const clean=raw.replace(/\s+/g,' ').trim();
   const lower=clean.toLowerCase();
-  const email=clean.match(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/)?.[0]||'';
+  const emailCandidate=clean.match(/[A-Z0-9._%+-]+\s*@\s*[A-Z0-9.-]+\s*\.\s*[A-Z]{2,}/i)?.[0]||'';
+  const email=emailCandidate.replace(/\s+/g,'');
   const phone=clean.match(/(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?9?\d{4}[-\s]?\d{4}/)?.[0]||'';
   const links=[...clean.matchAll(/https?:\/\/[^\s)]+/g)].map(x=>x[0]);
-  const linkedin=links.find(x=>/linkedin\.com/i.test(x))||'';
-  const instagram=links.find(x=>/instagram\.com/i.test(x))||'';
+  const normalizeWebUrl=value=>{const v=String(value||'').replace(/[),.;]+$/,'').trim();return v&&!/^https?:\/\//i.test(v)?'https://'+v:v;};
+  let linkedin=normalizeWebUrl(clean.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[A-Za-z0-9%._-]+/i)?.[0]||links.find(x=>/linkedin\.com/i.test(x))||'');
+  if(!linkedin){
+    const idx=lines.findIndex(x=>/(?:www\.)?linkedin\.com\/in\/\s*$/i.test(x));
+    if(idx>=0){
+      const nearby=lines.slice(idx+1,Math.min(lines.length,idx+3));
+      for(const line of nearby){
+        const slugs=[...line.matchAll(/\b([a-z0-9]+(?:-[a-z0-9]+){1,})\b/ig)].map(x=>x[1]);
+        if(slugs.length){linkedin='https://www.linkedin.com/in/'+slugs[slugs.length-1];break;}
+      }
+    }
+  }
+  const instagram=normalizeWebUrl(clean.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/[A-Za-z0-9._-]+/i)?.[0]||links.find(x=>/instagram\.com/i.test(x))||'');
   const portfolio=links.find(x=>!/linkedin\.com|instagram\.com/i.test(x))||'';
-  const skills=skillWords.filter(x=>{
-    const k=String(x||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
-    const hay=lower.normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-    const esc=k.replace(/[.*+?^$()|[\]{}\\]/g,'\\  const skills=skillWords.filter(x=>lower.includes(x));').replace(/\s+/g,'\\s+');
-    return new RegExp('(^|[^a-z0-9])'+esc+'([^a-z0-9]|$)','i').test(hay);
+  const normalizedSkillText=lower.normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const escapeRx=value=>String(value||'').replace(/[.*+?^$()|[\]{}\\]/g,'\\$&');
+  const matchedSkills=skillWords.filter(x=>{
+    const k=asciiText(x).trim();
+    if(!k)return false;
+    const phrase=escapeRx(k).replace(/\s+/g,'\\s+');
+    return new RegExp('(^|[^a-z0-9])'+phrase+'([^a-z0-9]|$)','i').test(normalizedSkillText);
   });
+  const skillMap=new Map(); for(const skill of matchedSkills){const key=asciiText(skill);if(!skillMap.has(key))skillMap.set(key,skill);}
+  const skills=[...skillMap.values()];
   const labeled=(rx)=>{const line=lines.find(x=>rx.test(x));return line?.replace(rx,'').replace(/^\s*[:\-–—]\s*/,'').trim()||'';};
   const cpf=(labeled(/^(?:cpf)\b/i)||clean.match(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/)?.[0]||'').trim();
   const cep=(labeled(/^(?:cep)\b/i)||clean.match(/\b\d{5}-?\d{3}\b/)?.[0]||'').trim();
   const birthDate=(labeled(/^(?:data de nascimento|nascimento)\b/i).match(/\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{4}\b/)?.[0]||'').trim();
-  let address=labeled(/^(?:endere[cç]o|logradouro)\b/i);
-  if(!address)address=lines.find(x=>/^(?:rua|avenida|av\.?|estrada|travessa|alameda|rodovia|pra[cç]a)\b/i.test(x))||'';
+  let address=labeled(/^(?:endereço|endereco|logradouro)\b/i);
+  if(!address)address=lines.find(x=>/^(?:rua|avenida|av\.?|estrada|travessa|alameda|rodovia|praça|praca)\b/i.test(x))||'';
   let neighborhood=labeled(/^(?:bairro)\b/i),residenceCity='',residenceState='';
-  const locLine=lines.find(x=>/^(?:AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\s*[-–—]\s*[^-–—]+\s*[-–—]\s*[^-–—]+$/i.test(x));
-  if(locLine){
-    const parts=locLine.split(/\s*[-–—]\s*/).map(x=>x.trim()).filter(Boolean);
-    if(parts.length>=3){residenceState=parts[0];residenceCity=parts[1];if(!neighborhood)neighborhood=parts.slice(2).join(' - ');}
+  const states='AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO';
+  for(const line of lines){
+    let m=line.match(new RegExp('^('+states+')\\s*[-–—]\\s*([^–—-]+?)(?:\\s*[-–—]\\s*(.+))?$','iu'));
+    if(m){residenceState=m[1].toUpperCase();residenceCity=m[2].trim();if(!neighborhood&&m[3])neighborhood=m[3].trim();break;}
+    m=line.match(new RegExp('^(.{2,60}?),\\s*('+states+')(?:,\\s*(?:BRASIL|BRAZIL))?$','i'));
+    if(m&&!/@|https?:|www\./i.test(line)){residenceCity=m[1].trim();residenceState=m[2].toUpperCase();break;}
+    m=line.match(new RegExp('^(.{2,60}?)\\s*[-–—/]\\s*('+states+')(?:,\\s*(?:BRASIL|BRAZIL))?$','iu'));
+    if(m&&!/@|https?:|www\./i.test(line)){residenceCity=m[1].trim();residenceState=m[2].toUpperCase();break;}
   }
-  return {name:guessName(text),email,phone,linkedin,portfolio,instagram,skills,rawText:text,
+  return {name:guessName(raw),email,phone,linkedin,portfolio,instagram,skills,rawText:raw,
     cpf,birthDate,cep,address,neighborhood,residenceCity,residenceState,additionalFacts:''};
 }

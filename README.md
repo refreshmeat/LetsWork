@@ -1,32 +1,59 @@
 # LetsWork
 
-Aplicação desktop local para importar currículos, buscar vagas em volume, ranquear oportunidades compatíveis, gerar um currículo específico para cada vaga e automatizar candidaturas sem inventar dados do candidato.
+Aplicação desktop local para importar currículos, identificar oportunidades compatíveis e automatizar candidaturas sem inventar dados do candidato.
 
-## Como funciona
+## Fluxo atual
 
-O LetsWork mantém dados separados por candidato. A busca usa currículo, preferências e a sessão ChatGPT web do operador para gerar uma família ampla de cargos e termos compatíveis. Depois coleta vagas, elimina duplicatas e incompatibilidades claras e ordena os resultados.
+Cada candidato possui dados, buscas, histórico e candidaturas isolados por `candidate_id`.
 
-O limite de 500 vale para a fila final das melhores vagas enviáveis. Vagas que exigem login, criação de conta ou barreira de e-mail não entram nessa fila.
+1. O currículo original e os documentos de apoio são importados.
+2. O LetsWork extrai os fatos do candidato.
+3. Um currículo-base otimizado é gerado uma única vez.
+4. O currículo-base precisa existir antes de qualquer envio.
+5. A busca deriva um conjunto compacto de cargos compatíveis.
+6. Regras objetivas eliminam incompatibilidades antes da IA.
+7. A IA local analisa apenas os poucos casos realmente ambíguos.
+8. O mesmo currículo-base é reutilizado em todas as candidaturas.
 
-RioVagas e Vagas.com são fontes prioritárias. LinkedIn e Gupy continuam sendo pesquisados, mas cada vaga é validada individualmente antes de ser considerada enviável.
+Não existe geração de currículo por vaga.
 
-## IA e currículos
+Documentos de apoio e portfólios servem apenas como evidência factual. Eles não são anexados automaticamente ao currículo enviado. Projetos relevantes podem ser descritos na seção de projetos do currículo-base.
 
-A única IA usada pelo LetsWork é a sessão persistente do ChatGPT web, configurada no perfil dedicado em GPT-5.6 Sol com nível High. O app controla essa sessão localmente por CDP em `127.0.0.1:9333`; não há Ollama/Llama nem fallback para a API oficial da OpenAI.
+## Fonte de vagas
 
-Cada candidato mantém uma única conversa persistente do ChatGPT, cuja URL é salva localmente. A mesma conversa gera termos de busca, seleciona conteúdo relevante, adapta cada currículo e responde perguntas de formulário quando necessário. O Playwright continua responsável pela navegação, preenchimento e envio das candidaturas.
+Durante a fase atual de validação, somente o RioVagas entra no fluxo automático. As demais integrações permanecem no projeto para serem validadas individualmente antes de serem ativadas.
 
-Para cada vaga, o LetsWork reconstrói um currículo direcionado usando somente fatos verificados do currículo-base e documentos de apoio. O portfólio original, quando presente, é anexado depois sem ser refeito, preservando suas imagens.
+A coleta do RioVagas usa cache local e atualização incremental. A interface recebe imediatamente as vagas decididas por regras. Casos ambíguos podem terminar a revisão de IA em segundo plano sem bloquear a busca.
 
-## Dados e privacidade
+## IA local
 
-Os dados operacionais ficam em `C:\Users\RefreshMeat\LetsWork\dados`. A ponte e o backend do aplicativo escutam somente em `127.0.0.1`.
+O único provider de IA do runtime é o Ollama.
 
-Dados de candidatos, banco SQLite, relatórios, sessões de navegador, currículos gerados, executáveis e certificados não são versionados no Git.
+O desktop escolhe o modelo conforme o hardware. Em máquinas mais modestas usa Llama 3.2 3B; o Llama 3.1 8B só é escolhido quando há RAM e VRAM suficientes. É possível sobrescrever o modelo com `OLLAMA_MODEL`.
 
-## Documentação
+A IA não é usada para inventar experiência, formação, ferramentas, resultados ou dados pessoais.
 
-- [Histórico técnico, decisões, erros e correções](docs/HISTORICO_TECNICO.md)
-- [Status atual e validações](docs/STATUS_ATUAL.md)
+## Envio
 
-Antes de alterar busca, ranking, histórico ou autenticação, leia o histórico técnico para evitar regressões já resolvidas.
+RioVagas usa o caminho HTTP direto quando disponível. O Playwright fica reservado para sites/formulários que realmente precisam de navegador.
+
+O envio nunca volta silenciosamente ao currículo original. Se o currículo-base não existir, o lote é interrompido com erro explícito.
+
+## Dados
+
+Dados operacionais ficam em:
+
+`C:\Users\RefreshMeat\LetsWork\dados`
+
+O banco SQLite, currículos, documentos, caches e relatórios não devem ser versionados.
+
+## Verificação
+
+`npm run check` valida a sintaxe dos módulos principais.
+
+`npm run smoke` executa verificações de regressão sobre isolamento de candidatos, integridade do banco e geração de currículo-base.
+## Arquitetura ativa: RioVagas
+
+Nesta fase, o LetsWork opera exclusivamente com RioVagas. O app mantém um inventário local global de até 30 dias, aplica filtros de 7/15/30 dias localmente, ranqueia por compatibilidade profissional e usa IA apenas para casos ambíguos. O envio é feito diretamente por HTTP, sem exigir login do candidato.
+
+Comandos de validação: `npm run check`, `npm run smoke`, `npm run regression` e `npm run regression:live`.

@@ -1,3 +1,5 @@
+> **Nota de 28/09/2026:** este arquivo registra decisões históricas. Trechos sobre ChatGPT web/CDP e geração de currículo por vaga descrevem fases antigas e não representam o runtime atual. Consulte `STATUS_ATUAL.md` para o estado vigente.
+
 # LetsWork — Histórico técnico, decisões e lições do projeto
 
 > Documento vivo. Atualizado em 17/09/2026.
@@ -27,7 +29,7 @@ O produto é um aplicativo desktop local para Windows. Ele deve:
 - O teto de 500 é da fila/lote de processamento, não da coleta.
 - A primeira busca de um candidato pode coletar 1.000, 2.000 ou mais vagas.
 - Só as melhores vagas elegíveis entram no lote de até 500.
-- Não incluir vaga ruim apenas para “completar 500”.
+- Não incluir vaga ruim apenas para "completar 500".
 - RioVagas e Vagas.com são fontes prioritárias porque historicamente entregam alto volume e baixo atrito.
 - LinkedIn e Gupy continuam importantes pela qualidade das vagas, mas cada vaga deve ser verificada individualmente.
 - Nenhuma fonte inteira deve ser proibida só pelo nome.
@@ -35,12 +37,12 @@ O produto é um aplicativo desktop local para Windows. Ele deve:
 - Formulário normal de candidatura pode conter e-mail de contato; o bloqueio é para e-mail usado como barreira de autenticação/conta.
 - Nunca inventar experiência, formação, licença profissional, senioridade, habilidade, disponibilidade, PCD ou dado pessoal.
 - Área pretendida informada pelo usuário tem prioridade sobre inferências.
-- PCD: excluir por padrão apenas vaga explicitamente exclusiva para PCD; vaga “também para PCD” pode permanecer.
+- PCD: excluir por padrão apenas vaga explicitamente exclusiva para PCD; vaga "também para PCD" pode permanecer.
 - Localização padrão: priorizar cidade escolhida, mas aceitar o estado.
 - Vagas remotas compatíveis podem entrar quando o filtro permitir.
 - Histórico é por candidato.
 - Repostagem legítima com nova data de publicação pode voltar.
-- Testes internos não podem marcar vaga como “já apresentada” para o candidato.
+- Testes internos não podem marcar vaga como "já apresentada" para o candidato.
 - Nunca alterar/apagar a pasta externa BARBARA_VAGAS.
 
 ## 3. Arquitetura atual
@@ -51,7 +53,7 @@ O produto é um aplicativo desktop local para Windows. Ele deve:
 - Backend Express local em 127.0.0.1:4317.
 - IA via sessão persistente do ChatGPT web, GPT-5.6 Sol High, controlada localmente por CDP em 127.0.0.1:9333. O Chromium dedicado roda fora da tela e sem ícone na barra de tarefas; o CDP força a página como ativa para preservar o streaming. Não há Ollama/Llama nem fallback para API oficial.
 - Build portátil para Windows.
-- Assinatura local Authenticode com certificado “LetsWork Local Code Signing”.
+- Assinatura local Authenticode com certificado "LetsWork Local Code Signing".
 
 ### Dados
 Raiz única do LetsWork:
@@ -82,7 +84,7 @@ Cada candidato mantém currículo original, documentos de apoio, currículos per
 - candidate_job_history
 - candidate_job_pool
 
-`candidate_job_pool` é o pool persistente recente por candidato. Ele permite coletar bastante, reaproveitar resultados recentes e separar “coletado” de “selecionado”.
+`candidate_job_pool` é o pool persistente recente por candidato. Ele permite coletar bastante, reaproveitar resultados recentes e separar "coletado" de "selecionado".
 
 ## 4. Pipeline de busca definido
 
@@ -146,7 +148,7 @@ Só deve excluir cedo quando houver incompatibilidade clara, como:
 
 Termos gerados pela IA são evidência de relevância.
 
-Correspondência de termo deve respeitar palavra/frase, não substring arbitrária. Correção importante: “marketing” não pode casar automaticamente com “telemarketing”.
+Correspondência de termo deve respeitar palavra/frase, não substring arbitrária. Correção importante: "marketing" não pode casar automaticamente com "telemarketing".
 
 ### Etapa E — sendability
 Depois do ranking, cada vaga é classificada para envio.
@@ -174,7 +176,7 @@ Como o RioVagas é uma fonte ampla, os itens recebem `broadCollection=true`. Ess
 Fonte primária.
 
 Regras:
-- buscar “mais recentes”;
+- buscar "mais recentes";
 - interpretar Hoje, Ontem, Há X dias e datas normais;
 - baixo volume de requisições;
 - espaçamento entre requisições;
@@ -202,7 +204,7 @@ Mesma regra: decisão por vaga, não por domínio.
 A IA existe para ampliar busca, não apenas para reescrever texto.
 
 Erro encontrado:
-o Ollama local levava aproximadamente 20–25 segundos na primeira inferência, mas o código desistia em poucos segundos. Resultado: a IA “existia” no projeto, porém a busca frequentemente caía no fallback antes de receber a resposta.
+o Ollama local levava aproximadamente 20–25 segundos na primeira inferência, mas o código desistia em poucos segundos. Resultado: a IA "existia" no projeto, porém a busca frequentemente caía no fallback antes de receber a resposta.
 
 Correções:
 - timeout de primeira inferência aumentado;
@@ -264,7 +266,7 @@ Teste após correção:
 - nenhuma vaga RioVagas ficou não verificada.
 
 ### 7.5 Histórico de testes contaminou candidato
-Testes anteriores escreveram centenas de vagas como “já apresentadas”.
+Testes anteriores escreveram centenas de vagas como "já apresentadas".
 
 Consequência:
 uma busca real retornou apenas uma vaga.
@@ -273,7 +275,7 @@ Foram removidas 363 marcações criadas pelos testes internos.
 
 Correção arquitetural:
 `preview=true` cria run de teste sem gravar histórico de apresentação.
-Runs PREVIEW também não devem virar “última execução” do candidato.
+Runs PREVIEW também não devem virar "última execução" do candidato.
 
 ### 7.6 Defaults incorretos em uma execução
 Foi observada execução com:
@@ -285,19 +287,19 @@ Os defaults corretos na UI são:
 - `entry`: sem ou pouca experiência.
 
 ### 7.7 Match de substring
-“marketing” podia casar dentro de “telemarketing”.
+"marketing" podia casar dentro de "telemarketing".
 
 Correção:
 comparação com limites de palavra/frase.
 
 ### 7.8 Termos ruins extraídos do currículo
-Fallback chegou a transformar nome da pessoa, “Formações”, localização e skills isoladas em termos de busca.
+Fallback chegou a transformar nome da pessoa, "Formações", localização e skills isoladas em termos de busca.
 
 Correção:
-limpeza de termos; IA não deve usar nome, cidade, idioma, ferramenta ou formação como “cargo” isolado.
+limpeza de termos; IA não deve usar nome, cidade, idioma, ferramenta ou formação como "cargo" isolado.
 
 ### 7.9 IA repetindo o mesmo cargo
-Modelo local pequeno gerou várias versões de “designer de interfaces”.
+Modelo local pequeno gerou várias versões de "designer de interfaces".
 
 Correção:
 prompt estruturado em direct/adjacent/entry, nomes curtos e funções distintas.
@@ -309,7 +311,7 @@ Correção:
 timeout global por fonte. A busca continua com as fontes já concluídas.
 
 ### 7.11 Timers de timeout geravam logs falsos
-Após a busca terminar, timers perdedores do `Promise.race` continuavam disparando mensagens “timeout”.
+Após a busca terminar, timers perdedores do `Promise.race` continuavam disparando mensagens "timeout".
 
 Correção:
 timer cancelado quando a fonte termina.
@@ -351,7 +353,7 @@ O LetsWork não depende de editar o arquivo original. O pipeline é genérico:
 6. reconstruir um currículo novo e profissional para aquela vaga;
 7. validar o PDF gerado antes de permitir candidatura.
 
-É proibido inserir uma “capa direcionada” na frente do currículo original e chamar isso de personalização.
+É proibido inserir uma "capa direcionada" na frente do currículo original e chamar isso de personalização.
 
 ### Portfólio
 
@@ -419,7 +421,7 @@ Estados de bloqueio devem diferenciar LOGIN e EMAIL.
 `candidate_job_history`:
 - impede reapresentar vagas efetivamente mostradas/processadas;
 - é isolado por candidato;
-- não deve registrar reserva não apresentada como “vista”;
+- não deve registrar reserva não apresentada como "vista";
 - PREVIEW não grava histórico.
 
 `candidate_job_pool`:
@@ -540,7 +542,7 @@ A resposta correta é falhar de forma explícita e preservar o que já foi colet
 
 ## 19. Regra para mudanças futuras
 
-Antes de “melhorar” ranking, login, PCD, localização ou histórico:
+Antes de "melhorar" ranking, login, PCD, localização ou histórico:
 1. ler este documento;
 2. identificar qual comportamento anterior será alterado;
 3. criar teste que reproduza o problema;
@@ -605,4 +607,6 @@ Consequ�ncia observada: o pool continha 2.577 vagas recentes do RioVagas e o r
 Regra corrigida: apenas `SENT` e `ALREADY_APPLIED` bloqueiam permanentemente uma vaga para o mesmo candidato. `SELECTED`, `ERROR`, `RESERVE`, `BLOCKED_LOGIN` e `UNVERIFIED_LOGIN` podem reaparecer quando fizer sentido.
 
 Valida��o ap�s a corre��o, em preview com o mesmo perfil e filtros padr�o: 2.554 vagas coletadas, 2.534 recentes, 3.351 no pool, apenas 5 j� enviadas ignoradas, 525 compat�veis e 79 envi�veis sem login. O RioVagas voltou a contribuir com 79 vagas envi�veis na rodada.
+## 2026-09-29 — consolidação do pipeline Rio-only
 
+Refatoração do fluxo para inventário global de 30 dias, FTS5/BM25, isolamento candidato-vaga por `inventory_id`, candidatura HTTP dedicada ao RioVagas, recibos de envio, telemetria de execução e backup portátil. Playwright foi removido das dependências e as fontes antigas foram excluídas do build, permanecendo apenas como código de referência fora do runtime atual. A regressão cobre isolamento entre candidatos, janela 7/15/30, duplicidade, FTS, recibos e fonte única.
