@@ -25,6 +25,60 @@ function inferredNeighborhood(profile){
     ||raw.match(/(?:bairro\s*[:\-]\s*)([^\n,;|]{2,60})/i)?.[1]?.trim()
     ||'';
 }
+function residenceText(profile,prefs={}){
+  const neighborhood=inferredNeighborhood(profile);
+  const city=String(profile?.residenceCity||prefs?.city||'').trim();
+  const state=String(profile?.residenceState||prefs?.state||'').trim();
+  const address=String(profile?.address||'').trim();
+  if(address)return [address,city,state].filter(Boolean).join(' - ');
+  return [neighborhood,city,state].filter(Boolean).join(' - ');
+}
+function educationAnswer(profile){
+  const lines=rawResumeLines(profile);
+  const higherIndex=lines.findIndex(x=>/bacharel|gradua|licenciatura|tecnologo|faculdade|universidade|curso superior/.test(norm(x)));
+  if(higherIndex>=0){
+    const nearby=lines.slice(higherIndex,Math.min(lines.length,higherIndex+3)).join(' ');
+    return nearby.replace(/\s+/g,' ').trim().slice(0,260);
+  }
+  const mediumIndex=lines.findIndex(x=>/ensino medio/.test(norm(x)));
+  if(mediumIndex>=0){
+    const nearby=lines.slice(mediumIndex,Math.min(lines.length,mediumIndex+3));
+    const complete=nearby.some(x=>/completo|concluido|concluida/.test(norm(x)));
+    return complete?'Ensino Médio completo':nearby[0].replace(/\s+/g,' ').trim();
+  }
+  const fundamentalIndex=lines.findIndex(x=>/ensino fundamental/.test(norm(x)));
+  if(fundamentalIndex>=0)return lines[fundamentalIndex];
+  const technicalIndex=lines.findIndex(x=>/curso tecnico|tecnico em/.test(norm(x)));
+  return technicalIndex>=0?lines[technicalIndex]:null;
+}
+function languageEvidence(profile){
+  const lines=rawResumeLines(profile);
+  const known=[
+    ['Inglês',['ingles','english']],
+    ['Espanhol',['espanhol','spanish']],
+    ['Francês',['frances','french']],
+    ['Alemão',['alemao','german']],
+    ['Italiano',['italiano','italian']]
+  ];
+  const out=[];
+  for(const [label,aliases] of known){
+    const line=lines.find(x=>aliases.some(a=>norm(x).includes(a)));
+    if(!line)continue;
+    const level=norm(line).match(/\b(basico|intermediario|avancado|fluente|nativo|a1|a2|b1|b2|c1|c2)\b/)?.[1]||'';
+    const pretty={basico:'básico',intermediario:'intermediário',avancado:'avançado',fluente:'fluente',nativo:'nativo'}[level]||level.toUpperCase();
+    out.push({label,level,text:pretty?label+' '+pretty:line.replace(/\s+/g,' ').trim()});
+  }
+  return out;
+}
+function languageMeets(profile,language,requested){
+  const evidence=languageEvidence(profile);
+  const aliases={ingles:'Inglês',english:'Inglês',espanhol:'Espanhol',spanish:'Espanhol',frances:'Francês',french:'Francês',alemao:'Alemão',german:'Alemão'};
+  const item=evidence.find(x=>x.label===aliases[language]);
+  if(!item)return false;
+  if(requested==='fluente')return /^(?:fluente|nativo|c2)$/i.test(item.level);
+  const rank={a1:1,a2:1,basico:1,b1:2,b2:2,intermediario:2,c1:3,avancado:3,c2:4,fluente:4,nativo:5};
+  return (rank[item.level]||0)>=(rank[requested]||0);
+}
 export function knownAnswer(label,profile,prefs,job=null){
   const q=norm(label),raw=String(profile.rawText||''),neighborhood=inferredNeighborhood(profile);
   const saved=profile?.formAnswers&&typeof profile.formAnswers==='object'?profile.formAnswers:{};
@@ -36,9 +90,11 @@ export function knownAnswer(label,profile,prefs,job=null){
   if(/telefone|celular|whatsapp/.test(q)) return profile.phone||null;
   if(/\bcpf\b/.test(q)) return profile.cpf||null;
   if(/data.*nascimento|nascimento/.test(q)) return profile.birthDate||null;
-  if(/idade/.test(q)) return ageFromBirth(profile.birthDate);
+  if(/\bidade\b/.test(q)) return ageFromBirth(profile.birthDate);
   if(/\bcep\b/.test(q)) return profile.cep||null;
   if(/(?:tempo|demora|desloc|minut)/.test(q)&&/(?:bairro|resid|mora)/.test(q)) return null;
+  if(/(?:em qual|qual).*cidade.*bairro|(?:em qual|qual).*bairro.*cidade/.test(q)){const v=residenceText(profile,prefs);if(v)return v;}
+  if(/onde.*(?:mora|reside)|qual.*local.*residencia|local.*residencia/.test(q)){const v=residenceText(profile,prefs);if(v)return v;}
   if(/(?:em que|qual).*bairro|bairro.*resid|bairro.*mora/.test(q)&&neighborhood) return neighborhood;
   if(/reside em bairros|voce reside em|mora em (?:algum|um) dos/.test(q)&&neighborhood) return q.includes(norm(neighborhood))?'Sim':'Não';
   if(/bairro/.test(q)&&neighborhood) return neighborhood;
@@ -56,10 +112,13 @@ export function knownAnswer(label,profile,prefs,job=null){
   if(/instagram|@/.test(q)&&profile.instagram) return profile.instagram;
   if(/portfolio/.test(q)&&profile.portfolio) return profile.portfolio;
   if(/semestre|periodo/.test(q)){ const m=raw.match(/\b(\d{1,2})\s*(?:º|°|o)?\s*(?:semestre|periodo)\b/i); if(m)return m[1]; }
+  if(/escolaridade|grau.*escolar|nivel.*escolar/.test(q)) return educationAnswer(profile);
   if(/curso|graduacao|faculdade|formacao/.test(q)) return lineMatch(raw,/bacharel|gradua|faculdade|universidade|curso superior/i);
-  if(/ingles/.test(q)) return lineMatch(raw,/ingl[eê]s|english/i);
+  if(/quais?.*idiomas|idiomas?.*(?:possui|fala|fluencia)/.test(q)){const items=languageEvidence(profile);if(items.length)return items.map(x=>x.text).join(' e ');}
+  if(/(?:qual|nivel).*(?:ingles|english)|(?:ingles|english).*nivel/.test(q)) return lineMatch(raw,/ingl[eê]s|english/i);
   if(/pcd|deficiencia/.test(q)) return profile.pcd===true?'Sim':profile.pcd===false?'Não':null;
   if(/contratacao.*pj|aceita.*pj/.test(q)) return (prefs.contractTypes||[]).includes('PJ')?'Sim':'Não';
+  if(/disciplina.*home office|trabalhar.*100%?\s*home office/.test(q)&&/\b(?:remoto|home office)\b/.test(norm(raw))) return 'Sim. Tenho experiência anterior com atendimento remoto, conforme descrito no currículo.';
   if(/disponibilidade/.test(q)) return prefs.availability===false?'Não':prefs.availability===true?'Sim':null;
   return null;
 }
@@ -122,6 +181,17 @@ function deterministicFormAnswer(question,options,profile,prefs,job){
 
   if(/disponibilidade/.test(q)&&prefs?.availability!==undefined)return yesNo(prefs.availability!==false);
 
+  const languageNames=['ingles','english','espanhol','spanish','frances','french','alemao','german'];
+  const mentionedLanguages=languageNames.filter(name=>new RegExp('(^|[^a-z])'+name+'([^a-z]|$)').test(q));
+  const yesNoOptions=opts.some(x=>norm(x)==='sim')&&opts.some(x=>norm(x)==='nao');
+  if(mentionedLanguages.length&&yesNoOptions){
+    let requested=q.match(/\b(basico|intermediario|avancado|fluente|nativo)\b/)?.[1]||'';
+    if(!requested&&/fluenc/.test(q))requested='fluente';
+    if(requested){
+      const canonical=[...new Set(mentionedLanguages.map(x=>({english:'ingles',spanish:'espanhol',french:'frances',german:'alemao'}[x]||x)))];
+      return yesNo(canonical.every(lang=>languageMeets(profile,lang,requested)));
+    }
+  }
   const lang=q.match(/\b(?:nivel\s+(?:de\s+)?)?(ingles|english|espanhol|spanish|frances|french|alemao|german)\b/);
   if(lang){
     const names={
@@ -248,7 +318,7 @@ export function safeFallbackAnswer(question,options=[],profile={},prefs={},job=n
   }
   if(/disponibilidade/.test(q)) return prefs.availability===false?'Não':'Sim';
   if(/pretens.*salar|salario/.test(q)) return prefs.salaryExpectation||'A combinar';
-  if(/motiva|porque.*vaga|por que.*vaga|interesse.*vaga/.test(q)) return `Tenho interesse na oportunidade de ${job?.title||'trabalho'} por ser compatível com minha formação, conhecimentos e objetivos profissionais descritos no currículo.`;
+  if(/motiva|porque.*vaga|por que.*vaga|por que.*(?:boa pessoa|trabalhar|oportunidade)|interesse.*vaga/.test(q)){const exp=experienceSummaryAnswer(profile);return exp?`Tenho experiência comprovada relacionada à oportunidade, incluindo ${exp.slice(0,360)}. Busco contribuir com atendimento responsável, organização e aprendizado contínuo.`:`Tenho interesse na oportunidade de ${job?.title||'trabalho'} por ser compatível com minha formação, conhecimentos e objetivos profissionais descritos no currículo.`;}
   if(/apresent|fale sobre voce|conte sobre voce|resumo profissional/.test(q)) return 'Meu currículo apresenta minha formação, experiências e competências comprovadas relacionadas à oportunidade.';
   if(opts.length){
     const safe=opts.find(x=>/não se aplica|nao se aplica|sem experi|a combinar|^0$|^(nao|não)$/i.test(x.trim())); if(safe)return safe;
@@ -293,7 +363,7 @@ export async function aiAnswers(questions,profile,prefs,job=null){
       }
     }
     if(!answer&&/disponibilidade/.test(n))answer=prefs.availability===false?'Não':'Sim';
-    if(!answer&&/(motiva|porque.*vaga|por que.*vaga|interesse.*vaga)/.test(n))answer=safeFallbackAnswer(label,options,profile,prefs,job);
+    if(!answer&&/(motiva|porque.*vaga|por que.*vaga|por que.*(?:boa pessoa|trabalhar|oportunidade)|interesse.*vaga)/.test(n))answer=safeFallbackAnswer(label,options,profile,prefs,job);
     if(!answer&&/(apresent|fale sobre voce|conte sobre voce|resumo profissional)/.test(n))answer=safeFallbackAnswer(label,options,profile,prefs,job);
     if(answer)out.set(id,String(answer));
     else if(requiresConfirmedPersonalData||requiresPreciseTravel||objectiveQuestionWithoutAI(label)){}

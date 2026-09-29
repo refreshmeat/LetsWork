@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import { db } from '../src/db.mjs';
 import { queryRioInventory, sourceRegistry } from '../src/services/inventory.mjs';
+import { prefilterJobsForAI } from '../src/services/ranking.mjs';
+import { knownAnswer, aiAnswers } from '../src/apply/answers.mjs';
 
 function assert(condition,message){
   if(!condition)throw new Error(message);
@@ -91,6 +93,33 @@ for(const file of ['src/server.mjs','src/services/jobs.mjs','src/apply/rio.mjs']
   assert(!/from\s+['"]\.\/sources\//.test(text),'Fonte legada voltou ao runtime ativo: '+file);
 }
 
+const syntheticDesignFilters={
+  nationwide:false,state:'RJ',city:'Rio de Janeiro',cities:['Rio de Janeiro'],states:['RJ'],locationScope:'state_priority',
+  area:'Design, UX/UI e Design Gráfico',workMode:'include_remote',pcdMode:'exclude',experienceLevel:'entry',recencyDays:30,
+  contractTypes:['CLT','PJ','ESTAGIO','TEMPORARIO','APRENDIZ','FREELANCE'],
+  searchFamilies:['Design','UX/UI','UI'],searchCoreTerms:['designer gráfico','ux','ui'],
+  searchAdjacentTerms:['marketing digital','criação visual'],searchLiteralTerms:['figma','photoshop','canva'],
+  searchTargetTerms:['designer gráfico','ux','ui','criação visual']
+};
+const syntheticDesignProfile={rawText:'Bacharelado em Design em andamento. Figma Photoshop Canva UX UI.',skills:['Figma','Photoshop','Canva','UX','UI','Design']};
+const syntheticJobs=[
+  {source:'RioVagas',title:'Designer Gráfico Júnior',description:'Criação de peças visuais, Figma, Photoshop e materiais digitais.',location:'Rio de Janeiro - RJ',url:'https://riovagas.com.br/riovagas/design-grafico-junior',publishedAt:new Date().toISOString(),contractType:'CLT'},
+  {source:'RioVagas',title:'Assistente de Projetos - Móveis Planejados',description:'Atendimento ao cliente, projeto de móveis planejados e Promob. Ambiente de design.',location:'Rio de Janeiro - RJ',url:'https://riovagas.com.br/riovagas/moveis-planejados',publishedAt:new Date().toISOString(),contractType:'CLT'},
+  {source:'RioVagas',title:'Ajudante de Marcenaria',description:'Apoio à produção de mobiliário e peças de design.',location:'Rio de Janeiro - RJ',url:'https://riovagas.com.br/riovagas/ajudante-marcenaria',publishedAt:new Date().toISOString(),contractType:'CLT'}
+];
+const syntheticRanked=prefilterJobsForAI(syntheticJobs,syntheticDesignProfile,syntheticDesignFilters);
+assert(syntheticRanked.some(x=>/Designer Gráfico Júnior/i.test(x.title)),'Vaga válida de Design foi rejeitada pela regressão sintética');
+assert(!syntheticRanked.some(x=>/Marcenaria|Móveis Planejados/i.test(x.title)),'Domínio de marcenaria/móveis vazou para perfil de Design');
+
+const syntheticMaria={
+  address:'Rua Virginia Vidal 148',neighborhood:'Tanque',residenceCity:'Rio de Janeiro',residenceState:'RJ',
+  rawText:'ENSINO MÉDIO\nCompleto - Colégio Estadual Bangu\nIDIOMAS\nInglês Básico\nEspanhol Básico\nEXPERIÊNCIA\nAtendimento presencial e remoto.'
+};
+const mariaPrefs={city:'Rio de Janeiro',state:'RJ'};
+assert(/Ensino Médio/i.test(String(knownAnswer('Qual a sua escolaridade ?',syntheticMaria,mariaPrefs)||'')),'Escolaridade conhecida deixou de ser reconhecida');
+assert(/Tanque|Rio de Janeiro/i.test(String(knownAnswer('Em qual cidade e bairro você reside?',syntheticMaria,mariaPrefs)||'')),'Cidade/bairro conhecidos deixaram de ser reconhecidos');
+const languageAnswers=await aiAnswers([{id:'1',question:'Tem Inglês intermediário',options:['Sim','Não']}],syntheticMaria,mariaPrefs,null);
+assert(languageAnswers.get('1')==='Não','Nível de idioma inferior ao exigido não foi respondido com segurança');
 console.log(JSON.stringify({
   ok:true,
   source:enabled[0].name,

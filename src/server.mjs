@@ -532,7 +532,7 @@ async function processRun(runId,onlyErrors=false){
       const index=cursor++;if(index>=jobs.length)return;
       const job=jobs[index];
       const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
-      if(['SENT','ALREADY_APPLIED'].includes(old?.status))continue;
+      if(['SENT','ALREADY_APPLIED','UNCERTAIN','CLOSED'].includes(old?.status))continue;
       try{
         saveApplication(job,'PREPARING','');
         const result=await applyRioVagasDirect(job,applicationResume,profile,prefs,{dryRun});
@@ -574,7 +574,10 @@ function persistRunSelection(runId,selectedJobIds){
   const run=getRun(runId);
   if(!run)throw new Error('Execução não encontrada');
   const batch=Math.max(1,Number(run.active_batch||1));
-  const allowed=db.prepare('SELECT id FROM jobs WHERE run_id=? AND sendable=1 AND batch_no=?').all(runId,batch).map(x=>Number(x.id));
+  const allowed=db.prepare(`SELECT j.id FROM jobs j
+    LEFT JOIN applications a ON a.run_id=j.run_id AND a.job_id=j.id
+    WHERE j.run_id=? AND j.sendable=1 AND j.batch_no=?
+      AND COALESCE(a.status,'') NOT IN ('SENT','ALREADY_APPLIED','UNCERTAIN','CLOSED')`).all(runId,batch).map(x=>Number(x.id));
   const allowedSet=new Set(allowed);
   const requested=Array.isArray(selectedJobIds)?[...new Set(selectedJobIds.map(Number).filter(x=>Number.isInteger(x)&&allowedSet.has(x)))]:[];
   db.prepare('UPDATE jobs SET selected=0 WHERE run_id=? AND sendable=1 AND batch_no=?').run(runId,batch);
@@ -624,6 +627,7 @@ app.post('/api/run/:id/batch/:batch',(req,res)=>{
 app.get('/api/run/:id/status',(req,res)=>{
   const id=Number(req.params.id); const run=getRun(id);
   if(!run) return res.status(404).json({error:'Execução não encontrada'});
+  const runPrefs=parseJson(run.filters_json,{});
   const counts=db.prepare('SELECT a.status,COUNT(*) count FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.run_id=? AND j.selected=1 GROUP BY a.status').all(id);
   const total=db.prepare('SELECT COUNT(*) count FROM jobs WHERE run_id=? AND selected=1 AND sendable=1').get(id).count;
   const pool=db.prepare(`SELECT COUNT(*) poolTotal,COALESCE(SUM(sendable),0) sendableTotal,
@@ -634,7 +638,7 @@ app.get('/api/run/:id/status',(req,res)=>{
     COALESCE(SUM(CASE WHEN sendable=0 AND blocked_reason NOT IN ('LOGIN_REQUIRED','EMAIL_REQUIRED','AI_REVIEW_PENDING','ALREADY_SENT') THEN 1 ELSE 0 END),0) unverifiedLogin,
     COALESCE(SUM(CASE WHEN sendable=1 AND selected=0 THEN 1 ELSE 0 END),0) reserve,
     COALESCE(MAX(batch_no),0) batches FROM jobs WHERE run_id=?`).get(id);
-  res.json({runId:id,candidateId:run.candidate_id,resumeId:run.resume_id,status:run.status,total,activeBatch:run.active_batch||1,...pool,counts:Object.fromEntries(counts.map(x=>[x.status,x.count]))});
+  res.json({runId:id,candidateId:run.candidate_id,resumeId:run.resume_id,status:run.status,mode:runPrefs.autoSubmit?'live':'dry',total,activeBatch:run.active_batch||1,...pool,counts:Object.fromEntries(counts.map(x=>[x.status,x.count]))});
 });
 
 function reportRows(runId){

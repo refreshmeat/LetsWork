@@ -113,7 +113,8 @@
           <div class="form-grid two compact-grid">
             <label>Pretensão salarial padrão<input id="salaryExpectation" value="A combinar"></label>
             <label>Execução
-              <select id="submitMode"><option value="dry">Simulação</option><option value="live">Modo real</option></select>
+              <select id="submitMode"><option value="dry">Simulação segura</option><option value="live">Modo real</option></select>
+              <span id="submitModeHint" class="field-hint">Valida formulários e respostas sem enviar candidaturas.</span>
             </label>
           </div>
           <div class="toggle-line split">
@@ -132,13 +133,33 @@
             <div class="action-row">
               <select id="batchSelect" class="batch-select hidden" aria-label="Lote de vagas"></select>
               <button id="applyBtn" class="primary" type="button">Processar este lote</button>
-              <button id="retryBtn" class="ghost" type="button">Refazer erros e pendências</button>
+              <button id="retryBtn" class="ghost" type="button">Retentar erros e dados preenchidos</button>
               <a id="xlsxBtn" class="ghost button-link" href="#">Excel</a>
               <a id="csvBtn" class="ghost button-link" href="#">CSV</a>
             </div>
           </div>
           <div id="applyStatus" class="notice hidden"></div>
-          <div class="selection-bar"><label class="selection-toggle"><input id="selectAllJobs" type="checkbox" checked><span>Selecionar tudo</span></label><span id="selectionMeta" class="hint"></span></div>
+          <div id="runProgress" class="run-progress hidden">
+            <div class="run-progress-head"><span id="runProgressLabel">Processando lote</span><strong id="runProgressPct">0%</strong></div>
+            <div class="progress-track"><div id="runProgressBar" class="progress-bar"></div></div>
+          </div>
+          <div id="runSummary" class="run-summary hidden"></div>
+          <div id="uncertainWarning" class="notice warning hidden">Há candidatura sem confirmação segura. Ela não será retentada automaticamente para evitar envio duplicado.</div>
+          <div class="results-toolbar">
+            <div class="selection-bar"><label class="selection-toggle"><input id="selectAllJobs" type="checkbox" checked><span>Selecionar tudo</span></label><span id="selectionMeta" class="hint"></span></div>
+            <label class="status-filter">Mostrar
+              <select id="jobStatusFilter">
+                <option value="all">Todas as vagas</option>
+                <option value="pending">Ainda não processadas</option>
+                <option value="READY">Validadas</option>
+                <option value="SENT">Enviadas</option>
+                <option value="NEEDS_DATA">Precisam de dado</option>
+                <option value="ERROR">Com erro</option>
+                <option value="UNCERTAIN">Sem confirmação</option>
+                <option value="CLOSED">Encerradas</option>
+              </select>
+            </label>
+          </div>
           <div class="table-wrap">
             <table>
               <thead><tr><th class="select-col">Enviar</th><th>Vaga</th><th>Local</th><th>Remuneração</th><th>Compat.</th><th>Status</th><th></th></tr></thead>
@@ -225,4 +246,3 @@
 <script type="module" src="/app.js"></script>
 </body>
 </html>
-

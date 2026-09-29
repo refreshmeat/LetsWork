@@ -13,6 +13,7 @@ let selectedJobIds=new Set();
 let manuallyDeselectedJobIds=new Set();
 let selectionSaveTimer=null;
 let currentStatuses=new Map();
+let currentRunMode='dry';
 let uploadInFlight=false;
 let candidateSelectionSeq=0;
 
@@ -112,7 +113,7 @@ function showNewCandidate(openPicker=false){
   $('state').value='RJ'; $('city').value='Rio de Janeiro'; $('locationScope').value='state_priority'; $('area').value='';
   $('workMode').value='include_remote'; $('pcdMode').value='exclude'; $('experienceLevel').value='entry'; $('recencyDays').value='15';
   for(const id of ['clt','pj','internship','temporary','apprentice','freelance']) $(id).checked=true;
-  $('salaryExpectation').value='A combinar'; $('submitMode').value='dry'; $('availability').checked=false; $('salaryFromJob').checked=true; syncFilterInteractivity();
+  $('salaryExpectation').value='A combinar'; $('submitMode').value='dry'; syncSubmitModeHint(); $('availability').checked=false; $('salaryFromJob').checked=true; syncFilterInteractivity();
   $('resumeFile').value=''; renderSelectedFiles(); notice('uploadStatus','');
   $('newCandidateView').classList.remove('hidden'); $('candidateView').classList.add('hidden');
   $('candidateActions').classList.add('hidden'); $('pageTitle').textContent='Novo candidato';
@@ -281,14 +282,94 @@ function isAlreadySent(j){
   return j?.alreadySent===true||String(j?.blocked_reason||j?.reason||'').toUpperCase()==='ALREADY_SENT';
 }
 function isJobSelectable(j){
-  return !isAlreadySent(j)&&Number(j?.sendable??1)!==0;
+  const applicationStatus=String(currentStatuses.get(j?.url)?.status||'').toUpperCase();
+  return !isAlreadySent(j)&&Number(j?.sendable??1)!==0&&!['SENT','ALREADY_APPLIED','UNCERTAIN','CLOSED'].includes(applicationStatus);
 }
 
 function statusBadge(status,error=''){
-  const s=String(status||'').toUpperCase();
-  const cls=s==='SENT'?'sent':s==='ERROR'?'error':['SKIPPED_LOGIN','PREPARING','NEEDS_DATA','UNCERTAIN'].includes(s)?'wait':'ready';
-  const label=s==='SENT'?'ENVIADA':s==='PREPARING'?'PREPARANDO ENVIO':s==='READY'?'PRONTO PARA ENVIO':s==='SKIPPED_LOGIN'?'IGNORADA · LOGIN':s==='NEEDS_DATA'?'AGUARDANDO DADO':s==='UNCERTAIN'?'ENVIO INCERTO':s||'PENDENTE';
-  return `<span class="status-badge ${cls}" title="${esc(error)}">${esc(label)}</span>`;
+  const code=String(status||'PENDING').toUpperCase();
+  const map={
+    SENT:['sent','ENVIADA'],
+    ALREADY_APPLIED:['sent','JÁ CANDIDATADO'],
+    READY:['ready','VALIDADA'],
+    PREPARING:['processing','PREPARANDO'],
+    NEEDS_DATA:['wait','PRECISA DE DADO'],
+    ERROR:['error','ERRO'],
+    UNCERTAIN:['uncertain','NÃO CONFIRMADO'],
+    CLOSED:['closed','VAGA ENCERRADA'],
+    SKIPPED_INCOMPATIBLE:['closed','INCOMPATÍVEL'],
+    PENDING:['neutral','PENDENTE']
+  };
+  const [cls,label]=map[code]||['neutral',code];
+  const title=code==='UNCERTAIN'
+    ? `${error||'O site recebeu a tentativa, mas não confirmou o resultado.'} Não retentar automaticamente.`
+    : error;
+  return `<span class="status-badge ${cls}" title="${esc(title)}">${esc(label)}</span>`;
+}
+function effectiveJobStatus(job,application={}){
+  if(isAlreadySent(job))return 'SENT';
+  const status=String(application?.status||'').toUpperCase();
+  if(status)return status;
+  const blocked=String(job?.blocked_reason||job?.reason||'').toUpperCase();
+  if(blocked==='CLOSED')return 'CLOSED';
+  if(blocked==='SKIPPED_INCOMPATIBLE')return 'SKIPPED_INCOMPATIBLE';
+  return 'PENDING';
+}
+function statusFilterMatch(status,filter){
+  const code=String(status||'PENDING').toUpperCase(),wanted=String(filter||'all');
+  if(wanted==='all')return true;
+  if(wanted==='pending')return code==='PENDING'||code==='PREPARING';
+  if(wanted==='SENT')return code==='SENT'||code==='ALREADY_APPLIED';
+  return code===wanted;
+}
+function updateRunSummary(counts={},total=0,runStatus=''){
+  const c=counts||{},n=k=>Number(c[k]||0);
+  const sent=n('SENT')+n('ALREADY_APPLIED');
+  const ready=n('READY'),needs=n('NEEDS_DATA'),errors=n('ERROR'),uncertain=n('UNCERTAIN'),closed=n('CLOSED');
+  const terminal=sent+ready+needs+errors+uncertain+closed+n('SKIPPED_INCOMPATIBLE')+n('SKIPPED_LOGIN');
+  const pct=total?Math.min(100,Math.round(terminal/total*100)):0;
+  const summary=$('runSummary');
+  if(summary){
+    const cards=[
+      ['Processadas',total?`${terminal}/${total}`:String(terminal),''],
+      ['Validadas',String(ready),'ready'],
+      ['Enviadas',String(sent),'sent'],
+      ['Precisam de dado',String(needs),'wait'],
+      ['Erros',String(errors),'error'],
+      ['Sem confirmação',String(uncertain),'uncertain']
+    ];
+    summary.innerHTML=cards.map(([label,value,cls])=>`<div class="run-summary-item ${cls}"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`).join('');
+    summary.classList.toggle('hidden',!(total||terminal));
+  }
+  const progress=$('runProgress');
+  if(progress){
+    progress.classList.toggle('hidden',!total);
+    $('runProgressPct').textContent=`${pct}%`;
+    $('runProgressBar').style.width=`${pct}%`;
+    const active=['APPLYING','RETRYING','PREPARING'].includes(String(runStatus||'').toUpperCase());
+    $('runProgressLabel').textContent=active?'Processando lote':'Resumo do lote';
+    progress.classList.toggle('active',active);
+  }
+  $('uncertainWarning')?.classList.toggle('hidden',uncertain===0);
+  if($('retryBtn')){
+    const running=['APPLYING','RETRYING'].includes(String(runStatus||'').toUpperCase());
+    $('retryBtn').disabled=running||(needs+errors===0);
+    $('retryBtn').title=uncertain
+      ? 'Retenta somente erros e pendências com dados. Envios sem confirmação não são repetidos.'
+      : 'Retenta erros e pendências que já tenham os dados necessários.';
+  }
+}
+function syncSubmitModeHint(){
+  currentRunMode=$('submitMode')?.value==='live'?'live':'dry';
+  const hint=$('submitModeHint');
+  if(!hint)return;
+  if(currentRunMode==='live'){
+    hint.textContent='Modo real: as vagas selecionadas poderão ser enviadas. O LetsWork pedirá confirmação antes de começar.';
+    hint.classList.add('danger-hint');
+  }else{
+    hint.textContent='Simulação: valida formulários e respostas sem enviar candidaturas.';
+    hint.classList.remove('danger-hint');
+  }
 }
 
 function syncSelectionUi(){
@@ -334,21 +415,35 @@ function bindJobSelection(){
 }
 function renderJobs(jobs,statuses=currentStatuses){
   currentStatuses=statuses instanceof Map?statuses:new Map();
-  $('jobsBody').innerHTML=jobs.map(j=>{
-    const a=currentStatuses.get(j.url)||{}; const pct=Math.round((j.score||0)*100);
-    const sent=isAlreadySent(j);
+  const filter=$('jobStatusFilter')?.value||'all';
+  const visible=jobs.filter(j=>statusFilterMatch(effectiveJobStatus(j,currentStatuses.get(j.url)||{}),filter));
+  $('jobsBody').innerHTML=visible.length?visible.map(j=>{
+    const application=currentStatuses.get(j.url)||{},pct=Math.round((j.score||0)*100);
+    const status=effectiveJobStatus(j,application),sent=isAlreadySent(j)||['SENT','ALREADY_APPLIED'].includes(status);
     const checked=!sent&&selectedJobIds.has(Number(j.id))?'checked':'';
-    const selectCell=sent?'<span class="sent-check" title="Já enviada em busca anterior">✓</span>':`<input class="job-select" data-job-id="${Number(j.id)}" type="checkbox" ${checked} aria-label="Selecionar ${esc(j.title)}">`;
-    const rowClass=sent?'job-sent-history':(checked?'':'job-unselected');
-    const badge=sent?statusBadge('SENT','Enviada em busca anterior'):statusBadge(a.status,a.error);
+    const selectable=isJobSelectable(j)&&!['SENT','ALREADY_APPLIED','CLOSED','UNCERTAIN'].includes(status);
+    const selectCell=sent
+      ? '<span class="sent-check" title="Candidatura já registrada">✓</span>'
+      : selectable
+        ? `<input class="job-select" data-job-id="${Number(j.id)}" type="checkbox" ${checked} aria-label="Selecionar ${esc(j.title)}">`
+        : '<span class="select-placeholder">—</span>';
+    const rowClass=[
+      sent?'job-sent-history':'',
+      checked?'':'job-unselected',
+      status==='UNCERTAIN'?'job-uncertain':'',
+      status==='ERROR'?'job-error':'',
+      status==='NEEDS_DATA'?'job-needs-data':''
+    ].filter(Boolean).join(' ');
+    const badge=statusBadge(status,application.error||j.blocked_reason||'');
     return `<tr class="${rowClass}"><td class="select-col">${selectCell}</td>
-      <td><strong>${esc(j.title)}</strong><span class="sub">${esc(j.company||j.source||'')}${sent?' · já enviada':''}</span></td>
+      <td><strong>${esc(j.title)}</strong><span class="sub">${esc(j.company||j.source||'')}${sent?' · candidatura registrada':''}</span></td>
       <td>${esc(j.location||'')}</td><td>${esc(j.salary||'')}</td>
       <td><span class="score-badge">${pct}%</span></td><td>${badge}</td>
       <td><a class="link-out" href="${esc(j.url)}" target="_blank" rel="noreferrer">Abrir</a></td></tr>`;
-  }).join('');
+  }).join(''):`<tr><td colspan="7"><div class="empty-list">Nenhuma vaga neste filtro.</div></td></tr>`;
   bindJobSelection();syncSelectionUi();
 }
+
 function renderBatchControl(status={}){
   const total=Math.max(0,Number(status.batches||0)),active=Math.max(1,Number(status.activeBatch||1));
   const el=$('batchSelect');
@@ -365,6 +460,7 @@ async function loadRun(id,expectedCandidateId=candidateId,selectionSeq=candidate
   const jobsPayload=jr.ok?await jr.json():[];
   const apps=ar.ok?await ar.json():[];
   const status=sr.ok?await sr.json():{};
+  currentRunMode=status.mode==='live'?'live':'dry';
   if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==expectedId||Number(status.candidateId)!==expectedId){
     if(runId===requestedRunId)runId=null;
     return;
@@ -374,9 +470,9 @@ async function loadRun(id,expectedCandidateId=candidateId,selectionSeq=candidate
   manuallyDeselectedJobIds=new Set(currentJobs.filter(j=>isJobSelectable(j)&&Number(j.selected)===0).map(j=>Number(j.id)));
   currentStatuses=new Map(apps.map(x=>[x.url,x]));
   $('statJobs').textContent=currentJobs.length; $('statStatus').textContent=status.status||'Pronto';
-  renderJobs(currentJobs,currentStatuses); renderBatchControl(status);
+  renderJobs(currentJobs,currentStatuses); renderBatchControl(status); updateRunSummary(status.counts||{},Number(status.total||0),status.status);
   $('resultsCard').classList.toggle('hidden',!currentJobs.length);
-  $('resultMeta').textContent=currentJobs.length?`Lote ${status.activeBatch||1}/${status.batches||1}: ${currentJobs.filter(isJobSelectable).length} novas para processar · ${status.alreadySentTotal||0} já enviadas · ${status.sendableTotal||currentJobs.filter(isJobSelectable).length} automatizáveis sem login · ${status.reserve||0} guardadas em outros lotes · ${status.blockedLogin||0} bloqueadas por login e fora da fila.`:'';
+  $('resultMeta').textContent=currentJobs.length?`Lote ${status.activeBatch||1}/${status.batches||1}: ${currentJobs.filter(isJobSelectable).length} vagas neste lote · ${status.alreadySentTotal||0} já processadas anteriormente · ${status.sendableTotal||0} automatizáveis via RioVagas HTTP · ${status.reserve||0} em outros lotes.`:'';
   $('xlsxBtn').href=`/api/run/${id}/export.xlsx`; $('csvBtn').href=`/api/run/${id}/export.csv`;
 }
 function filters(){
@@ -463,7 +559,7 @@ async function pollSearchReview(targetRun){
   $('statJobs').textContent=currentJobs.length;
   renderJobs(currentJobs,currentStatuses);
   renderBatchControl(status);
-  $('resultMeta').textContent=`Lote ${status.activeBatch||1}/${status.batches||1}: ${currentJobs.length} vagas prontas · ${status.aiReviewPending||0} em análise pela IA · ${status.reserve||0} em outros lotes · ${status.blockedLogin||0} bloqueadas por login.`;
+  $('resultMeta').textContent=`Lote ${status.activeBatch||1}/${status.batches||1}: ${currentJobs.length} vagas · ${status.aiReviewPending||0} em análise pela IA · ${status.reserve||0} em outros lotes.`;
   if((status.aiReviewPending||0)>0){
     $('statStatus').textContent='Analisando vagas';
     notice('searchStatus',`${currentJobs.length} vagas já prontas. ${status.aiReviewPending} vagas ambíguas continuam em análise.`);
@@ -493,14 +589,12 @@ $('searchBtn').addEventListener('click',async()=>{
     await saveProfile();
     const r=await fetch('/api/search',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({resumeId,filters:filters()})});
     const d=await r.json(); if(!r.ok) throw new Error(d.error||'Falha na busca');
-    runId=d.runId; currentJobs=d.jobs||[];
+    runId=d.runId; currentRunMode=$('submitMode').value==='live'?'live':'dry'; currentJobs=d.jobs||[];
     selectedJobIds=new Set(currentJobs.filter(isJobSelectable).map(j=>Number(j.id)));
     manuallyDeselectedJobIds=new Set();
     currentStatuses=new Map(); $('statJobs').textContent=currentJobs.length; $('statStatus').textContent='Busca concluída';
     renderJobs(currentJobs,currentStatuses); $('resultsCard').classList.remove('hidden');
-    const sourceNames=[...new Set([...Object.keys(d.sourceCounts||{}),...Object.keys(d.sendableSourceCounts||{}),...Object.keys(d.blockedSourceCounts||{})])];
-    const sourceTriples=sourceNames.slice(0,12).map(k=>`${k}: ${d.sourceCounts?.[k]||0}/${d.sendableSourceCounts?.[k]||0}/${d.blockedSourceCounts?.[k]||0}`).join(' · ');
-    $('resultMeta').textContent=`${d.compatible} novas no lote 1 · ${d.alreadySentTotal||0} já enviadas encontradas · ${d.sendableTotal||0} enviáveis sem login · ${d.reserve||0} guardadas para outros lotes · ${d.blockedLogin||0} bloqueadas por login · ${d.unverifiedLogin||0} aguardando verificação · ${d.compatibleTotal||0} compatíveis salvas · ${d.recent??d.found} recentes.${sourceTriples?` Por fonte (coletadas/enviáveis/bloqueadas): ${sourceTriples}.`:''}`;
+    $('resultMeta').textContent=`${d.compatible} novas no lote 1 · ${d.alreadySentTotal||0} já processadas anteriormente · ${d.sendableTotal||0} automatizáveis via RioVagas HTTP · ${d.reserve||0} em outros lotes · ${d.aiReviewPending||0} em revisão da IA · ${d.recent??d.found} vagas recentes consultadas.`;
     renderBatchControl({batches:d.batches||1,activeBatch:1});
     $('xlsxBtn').href=`/api/run/${runId}/export.xlsx`; $('csvBtn').href=`/api/run/${runId}/export.csv`;
     notice('searchStatus',d.aiReviewPending>0?`${d.compatible} vagas já prontas. ${d.aiReviewPending} vagas ambíguas continuam em análise.`:`${d.compatible} vagas prontas neste lote.`);
@@ -521,13 +615,19 @@ async function pollStatus(){
   if(!runId) return;
   const r=await fetch(`/api/run/${runId}/status`); if(!r.ok) return;
   const d=await r.json(),c=d.counts||{};
+  currentRunMode=d.mode==='live'?'live':'dry';
   $('statStatus').textContent=d.status||'Processando';
-  notice('applyStatus',`Enviadas: ${c.SENT||0} · Preparando envio: ${c.PREPARING||0} · Prontas: ${c.READY||0} · Erros: ${c.ERROR||0} · Aguardando dados: ${c.NEEDS_DATA||0} · Incertas: ${c.UNCERTAIN||0} · Ignoradas por login: ${c.SKIPPED_LOGIN||0}`);
+  const terminal=(c.SENT||0)+(c.ALREADY_APPLIED||0)+(c.READY||0)+(c.ERROR||0)+(c.NEEDS_DATA||0)+(c.UNCERTAIN||0)+(c.CLOSED||0)+(c.SKIPPED_INCOMPATIBLE||0);
+  notice('applyStatus',`Processadas: ${terminal}/${d.total||0} · Enviadas: ${c.SENT||0} · Validadas: ${c.READY||0} · Precisam de dado: ${c.NEEDS_DATA||0} · Erros: ${c.ERROR||0} · Sem confirmação: ${c.UNCERTAIN||0} · Encerradas: ${c.CLOSED||0}`);
+  updateRunSummary(c,Number(d.total||0),d.status);
   if(d.status==='DONE'||d.status==='CANCELLED'||String(d.status).startsWith('ERROR')){
-    clearInterval(pollTimer);pollTimer=null;$('applyBtn').disabled=false;$('retryBtn').disabled=false;
+    clearInterval(pollTimer);pollTimer=null;$('applyBtn').disabled=false;
     await refreshApplications();await loadCandidates();renderCandidates();await loadPendingData();
+    const finalStatus=await fetch(`/api/run/${runId}/status`).then(x=>x.ok?x.json():null).catch(()=>null);
+    if(finalStatus)updateRunSummary(finalStatus.counts||{},Number(finalStatus.total||0),finalStatus.status);
   }
 }
+
 async function startRun(endpoint){
   if(!runId) return;
   if(endpoint==='apply'){
@@ -541,8 +641,12 @@ async function startRun(endpoint){
     confirmLive=true;
   }
   if(endpoint==='retry'){
-    if(!window.confirm('Refazer erros e pendências deste lote? Em uma execução real isso pode enviar candidaturas de verdade. Envios incertos NÃO serão repetidos.')) return;
-    confirmLive=true;
+    const retryLive=currentRunMode==='live';
+    const msg=retryLive
+      ? 'Retentar erros e pendências deste lote em MODO REAL? Somente ERROR e NEEDS_DATA serão retomados. Envios sem confirmação NÃO serão repetidos.'
+      : 'Retentar erros e pendências desta simulação? Somente ERROR e NEEDS_DATA serão retomados. Envios sem confirmação NÃO serão repetidos.';
+    if(!window.confirm(msg))return;
+    confirmLive=retryLive;
   }
   $('applyBtn').disabled=true;$('retryBtn').disabled=true;$('statStatus').textContent='Processando';
   const r=await fetch(`/api/run/${runId}/${endpoint}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirmLive,selectedJobIds:endpoint==='apply'?[...selectedJobIds]:undefined})}),d=await r.json();
@@ -613,7 +717,11 @@ $('latestReportBtn').addEventListener('click',e=>{
   if(!runId){e.preventDefault();toast('Faça pelo menos uma busca antes de gerar relatório.');}
 });
 
+$('jobStatusFilter')?.addEventListener('change',()=>renderJobs(currentJobs,currentStatuses));
+$('submitMode')?.addEventListener('change',syncSubmitModeHint);
+
 async function init(){
+  syncSubmitModeHint();
   await loadAI(); loadSystemStatus();
   await loadCandidates();
   if(candidates.length) await selectCandidate(candidates[0].id);

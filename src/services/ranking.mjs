@@ -176,6 +176,21 @@ function plannedRoleMismatch(job,filters){
   ];
   return divergent.some(rule=>rule.role.test(role)&&!rule.plan.test(plan));
 }
+function plannedDomainMismatch(job,filters){
+  const title=norm(job?.title||''),body=norm(job?.description||'');
+  const plan=norm([...(filters?.searchFamilies||[]),...(filters?.searchCoreTerms||[]),...(filters?.searchAdjacentTerms||[]),...(filters?.searchLiteralTerms||[])].join(' '));
+  const designPlan=/\b(?:design|designer|ux|ui|grafico|grafica|visual)\b/.test(plan);
+  if(designPlan){
+    const interiorPlan=/\b(?:interior|interiores|arquitetura|moveis|mobiliario|marcenaria|promob)\b/.test(plan);
+    const furnitureDomain=/\b(?:marcenaria|marceneir[oa]|ajudante de marcenaria|moveis planejados|mobiliario|promob|projetista de moveis|montador(?:a)? de moveis)\b/.test(title+' '+body.slice(0,900));
+    if(furnitureDomain&&!interiorPlan)return true;
+
+    const manualTrade=/\b(?:ajudante|auxiliar)\s+(?:de\s+)?(?:marcenaria|serralheria|carpintaria|producao|montagem)\b/.test(title);
+    if(manualTrade)return true;
+  }
+  return false;
+}
+
 function roleAliasSupported(role,filters){
   const r=norm(role),plan=norm([...(filters?.searchFamilies||[]),...(filters?.searchCoreTerms||[]),...(filters?.searchAdjacentTerms||[])].join(' '));
   if(/\b(?:atendente|atendimento|recepcionista|sac)\b/.test(r)&&/\b(?:atendimento|recepcao|customer service|customer success)\b/.test(plan))return true;
@@ -500,7 +515,7 @@ export function prefilterJobsForAI(jobs,profile,filters){
   return jobs.map(job=>{
     const roleHead=roleHeadOf(job.title),roleNorm=norm(roleHead);
     if(!roleNorm||entryMismatch(roleHead,profileText))return null;
-    if(specializationMismatch(job,profileText)||plannedSpecialtyMismatch(job,filters)||plannedRoleMismatch(job,filters)||clearlyOffTrackRole(roleHead,filters))return null;
+    if(specializationMismatch(job,profileText)||plannedSpecialtyMismatch(job,filters)||plannedRoleMismatch(job,filters)||plannedDomainMismatch(job,filters)||clearlyOffTrackRole(roleHead,filters))return null;
     if(String(filters.experienceLevel||'entry').toLowerCase()==='entry'&&/\b(?:gerente|coordenador|coordenadora|supervisor|supervisora|senior|sr\.?|pleno|head|diretor|diretora|lead|principal|staff)\b/.test(roleNorm))return null;
 
     const roleSet=roleTokens(roleHead);

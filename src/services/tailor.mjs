@@ -171,11 +171,43 @@ function wrapText(font,text,size,maxWidth){
   return lines;
 }
 const RESUME_TEMPLATES={
-  executive:{accent:[.10,.18,.27],ink:[.08,.09,.11],muted:[.34,.38,.42],line:[.78,.81,.84],margin:48,nameSize:23,targetSize:11,sectionSize:10.2,bodySize:9.8,leading:13.4,bulletGap:3},
-  classic:{accent:[.10,.10,.10],ink:[.08,.08,.08],muted:[.36,.36,.36],line:[.80,.80,.80],margin:50,nameSize:22,targetSize:10.8,sectionSize:10,bodySize:9.8,leading:13.5,bulletGap:3},
-  compact:{accent:[.16,.20,.24],ink:[.08,.09,.10],muted:[.38,.41,.44],line:[.82,.84,.86],margin:40,nameSize:20,targetSize:10.5,sectionSize:9.6,bodySize:9.2,leading:12.2,bulletGap:2}
+  executive:{accent:[.08,.16,.25],ink:[.07,.08,.10],muted:[.36,.40,.44],line:[.80,.83,.86],margin:46,nameSize:24,targetSize:11.2,sectionSize:10.4,bodySize:10.1,leading:14.0,itemGap:5},
+  classic:{accent:[.10,.10,.10],ink:[.07,.07,.07],muted:[.38,.38,.38],line:[.78,.78,.78],margin:48,nameSize:23,targetSize:11,sectionSize:10.2,bodySize:10.0,leading:13.8,itemGap:5},
+  compact:{accent:[.13,.18,.23],ink:[.07,.08,.09],muted:[.40,.42,.45],line:[.83,.85,.87],margin:40,nameSize:21,targetSize:10.5,sectionSize:9.7,bodySize:9.3,leading:12.4,itemGap:3}
 };
 function resumeTemplateName(value){return Object.hasOwn(RESUME_TEMPLATES,String(value||''))?String(value):'executive';}
+function resumeDisplayUrl(value){
+  return String(value||'').trim().replace(/^https?:\/\/(?:www\.)?/i,'').replace(/\/$/,'');
+}
+function resumeLocation(profile={}){
+  const city=String(profile.residenceCity||'').trim(),state=String(profile.residenceState||'').trim(),neighborhood=String(profile.neighborhood||'').trim();
+  if(neighborhood&&city&&state)return `${neighborhood} - ${city}, ${state}`;
+  if(city&&state)return `${city}, ${state}`;
+  return neighborhood||city||state||'';
+}
+function parseExperienceEntry(value){
+  const text=String(value||'').replace(/\s+/g,' ').trim();
+  const m=text.match(/^(.+?)\s+[—–-]\s+(.+?)\s*\|\s*([^:]+?)(?::\s*(.*))?$/);
+  if(!m)return {company:'',role:'',dates:'',details:[],raw:text};
+  return {
+    company:m[1].trim(),
+    role:m[2].trim(),
+    dates:m[3].trim(),
+    details:String(m[4]||'').split(/\s*;\s*/).map(x=>x.replace(/[.;]+$/,'').trim()).filter(Boolean).slice(0,4),
+    raw:text
+  };
+}
+function parseEducationEntry(value){
+  const text=String(value||'').replace(/\s+/g,' ').trim();
+  const [left,status='']=text.split(/\s*\|\s*/,2);
+  const pos=left.lastIndexOf(' - ');
+  return {title:(pos>=0?left.slice(0,pos):left).trim(),institution:(pos>=0?left.slice(pos+3):'').trim(),status:status.trim(),raw:text};
+}
+function parseProjectEntry(value){
+  const text=String(value||'').replace(/\s+/g,' ').trim();
+  const pos=text.indexOf(' - ');
+  return {title:(pos>=0?text.slice(0,pos):text).trim(),description:(pos>=0?text.slice(pos+3):'').trim(),raw:text};
+}
 async function renderResumePdf(source,job,profile,content,template='executive'){
   const style=RESUME_TEMPLATES[resumeTemplateName(template)];
   const pdf=await PDFDocument.create();
@@ -189,43 +221,115 @@ async function renderResumePdf(source,job,profile,content,template='executive'){
   const newPage=(continuation=false)=>{
     page=pdf.addPage(pageSize);y=pageSize[1]-margin;
     if(continuation){
-      page.drawText(String(profile.name||'Candidato'),{x:margin,y,size:9.4,font:bold,color:muted});
-      y-=16;page.drawLine({start:{x:margin,y},end:{x:pageSize[0]-margin,y},thickness:.55,color:line});y-=16;
+      page.drawText(String(profile.name||'Candidato').slice(0,80),{x:margin,y,size:9.4,font:bold,color:muted});
+      y-=14;page.drawLine({start:{x:margin,y},end:{x:pageSize[0]-margin,y},thickness:.5,color:line});y-=17;
     }
   };
-  const ensure=height=>{if(y-height<margin+16)newPage(true);};
-  const drawLines=(text,size=style.bodySize,font=regular,color=ink,indent=0,leading=style.leading)=>{
-    const wrapped=wrapText(font,text,size,maxWidth-indent);
-    ensure(wrapped.length*leading+3);
+  const ensure=height=>{if(y-height<margin+14)newPage(true);};
+  const drawLines=(text,size=style.bodySize,font=regular,color=ink,indent=0,leading=style.leading,max=maxWidth-indent)=>{
+    const wrapped=wrapText(font,String(text||''),size,max);
+    ensure(wrapped.length*leading+2);
     for(const textLine of wrapped){page.drawText(textLine,{x:margin+indent,y,size,font,color});y-=leading;}
+    return wrapped.length;
+  };
+  const drawRight=(text,size,font,color,yPos)=>{
+    const w=font.widthOfTextAtSize(String(text||''),size);
+    page.drawText(String(text||''),{x:pageSize[0]-margin-w,y:yPos,size,font,color});
   };
   const section=title=>{
-    ensure(28);y-=5;
+    ensure(29);y-=7;
     page.drawText(title.toUpperCase(),{x:margin,y,size:style.sectionSize,font:bold,color:accent});
-    y-=7;page.drawLine({start:{x:margin,y},end:{x:pageSize[0]-margin,y},thickness:.5,color:line});y-=12;
+    y-=7;page.drawLine({start:{x:margin,y},end:{x:pageSize[0]-margin,y},thickness:.45,color:line});y-=12;
   };
-  const bullets=(items,max=7)=>{
+  const simpleItems=(items,max=7)=>{
     for(const item of items.slice(0,max)){
-      ensure(26);page.drawCircle({x:margin+2.5,y:y+3,size:1.25,color:accent});
-      drawLines(item,style.bodySize,regular,ink,11,style.leading);y-=style.bulletGap;
+      ensure(24);
+      page.drawCircle({x:margin+2.3,y:y+3,size:1.15,color:accent});
+      drawLines(item,style.bodySize,regular,ink,10,style.leading);y-=style.itemGap;
+    }
+  };
+  const experienceItems=items=>{
+    for(const value of items.slice(0,6)){
+      const item=parseExperienceEntry(value);
+      if(!item.role){simpleItems([value],1);continue;}
+      ensure(42);
+      const title=`${item.role}${item.company?` - ${item.company}`:''}`;
+      const titleSize=style.bodySize+.15;
+      const available=maxWidth-(item.dates?bold.widthOfTextAtSize(item.dates,9.1)+18:0);
+      const titleLines=wrapText(bold,title,titleSize,available);
+      for(const ln of titleLines){page.drawText(ln,{x:margin,y,size:titleSize,font:bold,color:ink});y-=style.leading;}
+      if(item.dates&&titleLines.length===1)drawRight(item.dates,9.1,regular,muted,y+style.leading);
+      else if(item.dates){page.drawText(item.dates,{x:margin,y,size:9.1,font:regular,color:muted});y-=11.5;}
+      for(const detail of item.details.slice(0,3)){
+        ensure(20);page.drawCircle({x:margin+2.3,y:y+3,size:1.05,color:accent});
+        drawLines(detail,style.bodySize-.15,regular,ink,10,style.leading-.2);y-=1;
+      }
+      y-=style.itemGap;
+    }
+  };
+  const educationItems=items=>{
+    for(const value of items.slice(0,6)){
+      const item=parseEducationEntry(value);ensure(30);
+      const size=style.bodySize+.05,available=maxWidth-(item.status?regular.widthOfTextAtSize(item.status,9.0)+20:0);
+      const titleLines=wrapText(bold,item.title,size,available);
+      for(const ln of titleLines){page.drawText(ln,{x:margin,y,size,font:bold,color:ink});y-=style.leading;}
+      if(item.status&&titleLines.length===1)drawRight(item.status,9.0,regular,muted,y+style.leading);
+      else if(item.status){page.drawText(item.status,{x:margin,y,size:9.0,font:regular,color:muted});y-=11.5;}
+      if(item.institution){drawLines(item.institution,style.bodySize-.2,regular,muted,0,style.leading-.5);}
+      y-=style.itemGap;
+    }
+  };
+  const projectItems=items=>{
+    for(const value of items.slice(0,5)){
+      const item=parseProjectEntry(value);ensure(30);
+      drawLines(item.title,style.bodySize+.05,bold,ink,0,style.leading);
+      if(item.description)drawLines(item.description,style.bodySize-.15,regular,ink,0,style.leading-.25);
+      y-=style.itemGap;
     }
   };
 
   newPage(false);
-  page.drawText(String(profile.name||'Candidato').slice(0,80),{x:margin,y,size:style.nameSize,font:bold,color:ink});y-=style.nameSize+5;
-  page.drawText(content.target,{x:margin,y,size:style.targetSize,font:bold,color:accent});y-=18;
-  const contact=[profile.email,profile.phone,profile.linkedin,profile.portfolio].filter(Boolean).join('  |  ');
-  if(contact){drawLines(contact,8.6,regular,muted,0,11.5);y-=2;}
-  page.drawLine({start:{x:margin,y},end:{x:pageSize[0]-margin,y},thickness:.9,color:accent});y-=18;
+  page.drawText(String(profile.name||'Candidato').slice(0,80),{x:margin,y,size:style.nameSize,font:bold,color:ink});
+  y-=style.nameSize+4;
+  page.drawText(content.target,{x:margin,y,size:style.targetSize,font:bold,color:accent});
+  y-=17;
 
-  if(content.summary){section('Perfil profissional');drawLines(content.summary,style.bodySize+.2,regular,ink,0,style.leading+.4);y-=2;}
-  if(content.experience.length){section('Experiência profissional');bullets(content.experience,6);}
-  if(content.education.length){section('Formação acadêmica');bullets(content.education,6);}
-  if(content.courses?.length){section('Cursos complementares');bullets(content.courses,6);}
-  if(content.projects.length){section('Projetos selecionados');bullets(content.projects,6);}
-  if(content.skills.length){section('Competências');drawLines(content.skills.join('  |  '),style.bodySize,regular,ink,0,style.leading);y-=2;}
-  if(content.languages.length){section('Idiomas');bullets(content.languages,5);}
-  if(content.other.length){section('Informações adicionais');bullets(content.other,4);}
+  const contact=[
+    resumeLocation(profile),
+    profile.phone,
+    profile.email,
+    profile.linkedin?resumeDisplayUrl(profile.linkedin):'',
+    profile.portfolio?resumeDisplayUrl(profile.portfolio):''
+  ].filter(Boolean).join('  |  ');
+  if(contact){drawLines(contact,8.8,regular,muted,0,11.6);y-=3;}
+  page.drawLine({start:{x:margin,y},end:{x:pageSize[0]-margin,y},thickness:.8,color:accent});y-=17;
+
+  if(content.summary){
+    section('Perfil profissional');
+    drawLines(content.summary,style.bodySize+.15,regular,ink,0,style.leading+.15);y-=1;
+  }
+
+  const hasExperience=Boolean(content.experience?.length);
+  if(hasExperience){
+    section('Experiência profissional');experienceItems(content.experience);
+    if(content.education?.length){section('Formação acadêmica');educationItems(content.education);}
+  }else{
+    if(content.education?.length){section('Formação acadêmica');educationItems(content.education);}
+    if(content.projects?.length){section('Projetos selecionados');projectItems(content.projects);}
+  }
+
+  if(content.courses?.length){
+    section('Cursos complementares');simpleItems(content.courses,6);
+  }
+  if(hasExperience&&content.projects?.length){
+    section('Projetos selecionados');projectItems(content.projects);
+  }
+  if(content.skills?.length){
+    section('Competências');
+    drawLines(content.skills.join('  |  '),style.bodySize,regular,ink,0,style.leading);y-=2;
+  }
+  if(content.languages?.length){section('Idiomas');simpleItems(content.languages,5);}
+  if(content.other?.length){section('Informações adicionais');simpleItems(content.other,4);}
 
   const out=path.join(outputDir(source),`${slug(job.title)}_${Date.now()}.pdf`);
   fs.writeFileSync(out,await pdf.save());
@@ -458,7 +562,8 @@ function baseSkillDisplay(value){
 }
 function baseSkills(profile,target){
   let raw=[...new Set((profile?.skills||[]).map(x=>String(x).trim()).filter(Boolean))];
-  raw=raw.filter(x=>!languageRx.test(x));
+  const languageNames=new Set(['ingles','english','espanhol','spanish','frances','french','alemao','german','italiano','italian','portugues','portuguese']);
+  raw=raw.filter(x=>!languageRx.test(x)&&!languageNames.has(norm(x)));
   const norms=new Set(raw.map(norm));
   const combined=[];
   if(norms.has('ux')&&norms.has('ui')){combined.push('UX/UI');raw=raw.filter(x=>!['ux','ui'].includes(norm(x)));}
@@ -516,18 +621,27 @@ function baseSplitEntry(entry){
 function baseSummary(content){
   const sentences=[];
   const higher=(content.education||[]).find(x=>/bacharel|graduacao|licenciatura|tecnologo|mestrado|doutorado|pos/.test(norm(x)));
-  if((content.experience||[]).length&&content.target){
+  const expText=norm((content.experience||[]).join(' '));
+  const tools=(content.skills||[]).filter(x=>!/^(Design|UX\/UI)$/i.test(x)).slice(0,4);
+
+  if((content.experience||[]).length){
     sentences.push(`Profissional com experiência em ${content.target.charAt(0).toLowerCase()+content.target.slice(1)}.`);
+    const areas=[];
+    if(/atendimento|publico|cliente/.test(expText))areas.push('atendimento ao público');
+    if(/administrativ|document|planilha|registro/.test(expText))areas.push('rotinas administrativas');
+    if(/caixa|pagamento|fechamento/.test(expText))areas.push('operação de caixa e pagamentos');
+    if(/agenda|agendamento/.test(expText))areas.push('agendamentos');
+    if(/venda/.test(expText))areas.push('apoio a vendas');
+    if(areas.length)sentences.push(`Atuação comprovada em ${baseListPt(areas.slice(0,3))}.`);
   }else if(higher){
-    const e=baseSplitEntry(higher),n=norm(e.title);
+    const e=baseSplitEntry(higher);
     let subject=e.title.replace(/^(?:Bacharelado|Graduação|Licenciatura|Tecnólogo)\s+em\s+/i,'').trim()||e.title;
     const inst=e.institution.split(',')[0].trim();
     const sem=e.status.match(/(\d{1,2})\s*º?\s*semestre/i);
     if(/em andamento/.test(norm(e.status))&&sem){
-      const article=/^graduacao|^licenciatura/.test(n)?'da':'do';
-      sentences.push(`Estudante de ${subject}, cursando o ${sem[1]}º semestre ${article} ${e.title}${inst?` no ${inst}`:''}.`);
+      sentences.push(`Estudante de ${subject}, no ${sem[1]}º semestre${inst?` no ${inst}`:''}.`);
     }else if(/em andamento/.test(norm(e.status))){
-      sentences.push(`Estudante de ${subject}, com ${e.title} em andamento${inst?` no ${inst}`:''}.`);
+      sentences.push(`Estudante de ${subject}${inst?` no ${inst}`:''}.`);
     }else{
       sentences.push(`Formação em ${e.title}${inst?` pelo ${inst}`:''}.`);
     }
@@ -535,20 +649,19 @@ function baseSummary(content){
     sentences.push(`Formação: ${content.education[0].replace(/\s*\|\s*/g,', ')}.`);
   }
 
-  const details=[];
-  if(content.courses?.length){
-    const c=baseSplitEntry(content.courses[0]);
-    const courseTitle=c.title.replace(/^Curso\s+de\s+/i,'').trim();
-    details.push(`curso complementar em ${courseTitle}${c.institution?` pela ${c.institution.split(',')[0]}`:''}`);
+  if(!(content.experience||[]).length){
+    const details=[];
+    if(content.courses?.length){
+      const c=baseSplitEntry(content.courses[0]);
+      const courseTitle=c.title.replace(/^Curso\s+de\s+/i,'').trim();
+      details.push(`${courseTitle}${c.institution?` pela ${c.institution.split(',')[0]}`:''}`);
+    }
+    if(content.languages?.length){
+      const lang=baseSplitEntry(content.languages[0]).title.replace(/\s*-\s*/g,' ').trim();
+      if(lang)details.push(lang.charAt(0).toLowerCase()+lang.slice(1));
+    }
+    if(details.length)sentences.push(`Formação complementar em ${baseListPt(details)}.`);
   }
-  if(content.languages?.length){
-    let lang=content.languages[0].replace(/\s*-\s*/g,' ');
-    lang=lang.charAt(0).toLowerCase()+lang.slice(1);
-    details.push(lang);
-  }
-  const tools=(content.skills||[]).filter(x=>!/^(Design|UX\/UI)$/i.test(x)).slice(0,3);
-  if(tools.length)details.push(`conhecimentos em ${baseListPt(tools)}`);
-  if(details.length)sentences.push(`Possui ${baseListPt(details)}.`);
 
   const topics=[];
   const pn=norm((content.projects||[]).join(' '));
@@ -556,15 +669,20 @@ function baseSummary(content){
   if(/prototipo|fluxograma/.test(pn))topics.push('prototipação');
   if(/revista|capa|editorial/.test(pn))topics.push('design editorial');
   if(/clinica|servico/.test(pn)&&!topics.length)topics.push('projetos acadêmicos');
-  if(topics.length&&content.target)sentences.push(`Projetos acadêmicos em ${baseListPt(topics)}, alinhados ao foco em ${content.target}.`);
-  else if(topics.length)sentences.push(`Projetos acadêmicos em ${baseListPt(topics)}.`);
-  else if(!(content.experience||[]).length&&content.target)sentences.push(`Busca oportunidades em ${content.target}.`);
+  if(topics.length)sentences.push(`Projetos acadêmicos em ${baseListPt(topics.slice(0,3))}${tools.length?`, com uso de ${baseListPt(tools.slice(0,3))}`:''}.`);
+  else if(tools.length&&!(content.experience||[]).length)sentences.push(`Conhecimentos em ${baseListPt(tools.slice(0,3))}.`);
 
   return sentences.join(' ').replace(/\s+/g,' ').trim().slice(0,520);
 }
+
 function baseContentLocal(raw,profile,target){
   const {primary}=baseSplitSource(raw);
   const edu=baseEducationData(primary);
+  const sections=baseSections(primary);
+  const other=[...(sections.additional||[])]
+    .map(basePrettyText)
+    .filter(x=>x&&x.length>=12&&!/^(?:habilidades|competencias|skills)$/i.test(x))
+    .slice(0,4);
   const content={
     target,
     summary:'',
@@ -574,7 +692,7 @@ function baseContentLocal(raw,profile,target){
     projects:baseProjects(raw,target),
     skills:baseSkills(profile,target),
     languages:edu.languages,
-    other:[]
+    other
   };
   content.summary=baseSummary(content);
   return content;

@@ -27,7 +27,7 @@ export function createPortableBackup(){
   const stamp=new Date().toISOString().replace(/[:.]/g,'-');
   const file=path.join(storage.backups,`LetsWork-backup-${stamp}.zip`);
   const zip=new AdmZip();
-  const manifest={format:'letswork-backup',version:2,createdAt:new Date().toISOString(),includes:['database','candidates'],excluded:['browser_sessions','live_inventory_cache'],inventoryCanRefresh:true};
+  const manifest={format:'letswork-backup',version:3,createdAt:new Date().toISOString(),includes:['database','candidates'],excluded:['browser_sessions','live_inventory_cache'],inventoryCanRefresh:true,portablePaths:true};
   zip.addFile('letswork-backup.json',Buffer.from(JSON.stringify(manifest,null,2),'utf8'));
   const dbFile=path.join(storage.data,'letswork.sqlite');
   if(!fs.existsSync(dbFile))throw new Error('Banco local não encontrado');
@@ -43,6 +43,42 @@ function validateEntryName(name){
   return normalized==='letswork-backup.json'||normalized==='data/letswork.sqlite'||normalized.startsWith('candidatos/');
 }
 
+
+function rebaseCandidateFile(value){
+  const raw=String(value||'').trim();
+  if(!raw)return raw;
+  const normalized=raw.replace(/\\/g,'/');
+  const lower=normalized.toLowerCase();
+  const marker='/candidatos/';
+  const idx=lower.lastIndexOf(marker);
+  if(idx<0)return raw;
+  const rel=normalized.slice(idx+marker.length).split('/').filter(Boolean);
+  return path.join(storage.candidates,...rel);
+}
+function rebaseRestorePaths(database){
+  const specs=[
+    ['resumes','stored_path'],
+    ['resumes','base_resume_path'],
+    ['documents','stored_path'],
+    ['applications','tailored_file']
+  ];
+  database.exec('BEGIN');
+  try{
+    for(const [table,column] of specs){
+      const rows=database.prepare(`SELECT id,${column} AS value FROM ${table} WHERE ${column} IS NOT NULL AND ${column}<>''`).all();
+      const update=database.prepare(`UPDATE ${table} SET ${column}=? WHERE id=?`);
+      for(const row of rows){
+        const next=rebaseCandidateFile(row.value);
+        if(next!==row.value)update.run(next,row.id);
+      }
+    }
+    database.exec('COMMIT');
+  }catch(e){
+    try{database.exec('ROLLBACK');}catch{}
+    throw e;
+  }
+}
+
 export function preparePortableRestore(uploadFile){
   if(!uploadFile||!fs.existsSync(uploadFile))throw new Error('Arquivo de backup não encontrado');
   const zip=new AdmZip(uploadFile);
@@ -53,7 +89,7 @@ export function preparePortableRestore(uploadFile){
   const dbEntry=zip.getEntry('data/letswork.sqlite');
   if(!manifestEntry||!dbEntry)throw new Error('Backup LetsWork inválido ou incompleto');
   const manifest=JSON.parse(manifestEntry.getData().toString('utf8'));
-  if(manifest?.format!=='letswork-backup'||![1,2].includes(Number(manifest?.version)))throw new Error('Versão de backup não suportada');
+  if(manifest?.format!=='letswork-backup'||![1,2,3].includes(Number(manifest?.version)))throw new Error('Versão de backup não suportada');
 
   const staging=path.join(storage.temp,'restore-'+Date.now());
   fs.mkdirSync(staging,{recursive:true});
@@ -67,7 +103,8 @@ export function preparePortableRestore(uploadFile){
   const stagedDb=path.join(staging,'data','letswork.sqlite');
   let probe;
   try{
-    probe=new DatabaseSync(stagedDb,{readOnly:true});
+    probe=new DatabaseSync(stagedDb);
+    rebaseRestorePaths(probe);
     const candidateCount=Number(probe.prepare('SELECT COUNT(*) n FROM candidates').get()?.n||0);
     const resumeCount=Number(probe.prepare('SELECT COUNT(*) n FROM resumes').get()?.n||0);
     const applicationCount=Number(probe.prepare('SELECT COUNT(*) n FROM applications').get()?.n||0);

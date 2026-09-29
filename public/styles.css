@@ -56,3 +56,37 @@ tr.job-sent-history{background:#f4fbf7}tr.job-sent-history td{color:#53615a}.sen
 .inventory-state span{font-size:11px;opacity:.72;line-height:1.35}
 .backup-actions{display:grid;grid-template-columns:1fr;gap:7px;margin:8px 0 12px}
 .backup-actions .full{width:100%;justify-content:center;text-align:center}
+
+/* Estado de execução e filtros do lote */
+.field-hint{display:block;margin-top:6px;font-size:11px;line-height:1.4;color:var(--muted);font-weight:500}
+.field-hint.danger-hint{color:#9b3131}
+.run-progress{margin:10px 0 12px;padding:12px 13px;border:1px solid var(--line);border-radius:11px;background:#fafcfb}
+.run-progress.active{border-color:#bdd7cb;background:#f4faf7}
+.run-progress-head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:8px;font-size:12px;color:#4d5b54}
+.run-progress-head strong{font-size:12px}
+.progress-track{height:8px;border-radius:999px;background:#e8ecea;overflow:hidden}
+.progress-bar{height:100%;width:0;border-radius:999px;background:var(--accent);transition:width .25s ease}
+.run-summary{display:grid;grid-template-columns:repeat(6,minmax(110px,1fr));gap:8px;margin:10px 0 12px}
+.run-summary-item{border:1px solid var(--line);border-radius:10px;background:#fff;padding:10px 11px;min-width:0}
+.run-summary-item span{display:block;color:var(--muted);font-size:10px;font-weight:700;line-height:1.25;margin-bottom:5px}
+.run-summary-item strong{font-size:18px;letter-spacing:-.02em}
+.run-summary-item.ready{background:#f2f6fb;border-color:#dfe7f0}
+.run-summary-item.sent{background:#eef8f3;border-color:#d5eadf}
+.run-summary-item.wait{background:#fff8ea;border-color:#f1ddb3}
+.run-summary-item.error{background:#fff1f1;border-color:#efd1d1}
+.run-summary-item.uncertain{background:#fff4e6;border-color:#efcf9e}
+.notice.warning{background:#fff7e8;border:1px solid #ecd5a8;color:#74501b;margin:10px 0 12px}
+.results-toolbar{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:0 0 10px}
+.results-toolbar .selection-bar{flex:1;margin:0}
+.status-filter{display:flex;align-items:center;gap:8px;white-space:nowrap;font-size:11px}
+.status-filter select{width:auto;min-width:190px;margin:0;padding:8px 30px 8px 10px}
+.status-badge.processing{background:#eaf3ff;color:#3e658f}
+.status-badge.uncertain{background:#fff0d9;color:#8d5712}
+.status-badge.closed{background:#f0f1f1;color:#69716d}
+.status-badge.neutral{background:#f3f5f4;color:#68736d}
+tr.job-uncertain{background:#fffaf2}
+tr.job-error{background:#fff8f8}
+tr.job-needs-data{background:#fffdf7}
+.select-placeholder{color:#a1aaa5;font-weight:700}
+@media(max-width:980px){.run-summary{grid-template-columns:repeat(3,minmax(120px,1fr))}.results-toolbar{align-items:stretch;flex-direction:column}.status-filter{width:100%}.status-filter select{flex:1}}
+@media(max-width:620px){.run-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}

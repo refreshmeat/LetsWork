@@ -97,9 +97,6 @@ addColumn('jobs','rank_position','INTEGER DEFAULT 0');
 addColumn('jobs','inventory_id','INTEGER');
 addColumn('jobs','provider_job_id',"TEXT DEFAULT ''");
 addColumn('runs','active_batch','INTEGER DEFAULT 1');
-addColumn('job_inventory','canonical_url',"TEXT DEFAULT ''");
-addColumn('job_inventory','content_hash',"TEXT DEFAULT ''");
-addColumn('candidate_job_history','provider_job_id',"TEXT DEFAULT ''");
 db.exec(`
 CREATE TABLE IF NOT EXISTS candidate_job_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,6 +211,9 @@ CREATE TABLE IF NOT EXISTS run_events (
 );
 CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id,id);
 `);
+addColumn('job_inventory','canonical_url',"TEXT DEFAULT ''");
+addColumn('job_inventory','content_hash',"TEXT DEFAULT ''");
+addColumn('candidate_job_history','provider_job_id',"TEXT DEFAULT ''");
 
 db.exec("DROP TABLE IF EXISTS candidate_job_pool;");
 db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_inventory ON jobs(inventory_id);");
