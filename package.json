@@ -7,7 +7,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/services/ai.mjs && node --check src/services/jobs.mjs && node --check src/services/inventory.mjs && node --check src/services/backup.mjs && node --check src/services/ranking.mjs && node --check src/services/tailor.mjs && node --check src/apply/engine.mjs && node --check src/apply/rio.mjs && node --check public/app.js && node --check desktop/main.cjs",
+    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/services/ai.mjs && node --check src/services/jobs.mjs && node --check src/services/inventory.mjs && node --check src/services/backup.mjs && node --check src/services/ranking.mjs && node --check src/services/tailor.mjs && node --check src/apply/answers.mjs && node --check src/apply/rio.mjs && node --check public/app.js && node --check desktop/main.cjs",
     "server": "node src/server.mjs",
     "dist": "electron-builder --win nsis portable",
     "smoke": "node scripts/smoke.mjs",
@@ -41,8 +41,7 @@
       "desktop/**/*",
       "public/**/*",
       "src/**/*",
-      "!src/sources/**/*",
-      "scripts/**/*",
+      "scripts/word_convert.ps1",
       "package.json",
       ".env.example"
     ],
@@ -81,7 +80,7 @@
       "buildResources": "build"
     },
     "asarUnpack": [
-      "scripts/**/*"
+      "scripts/word_convert.ps1"
     ]
   },
   "author": "LetsWork"

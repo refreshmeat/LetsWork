@@ -80,6 +80,11 @@ const receiptJobMismatch=scalar(`
 `);
 assert(receiptJobMismatch===0,'Há recibo ligado à vaga errada');
 
+assert(!fs.existsSync(path.resolve('src/apply/engine.mjs')),'Motor legado de navegador voltou ao projeto');
+assert(!fs.existsSync(path.resolve('src/sources')),'Pasta de fontes legadas voltou ao projeto');
+const packageText=fs.readFileSync(path.resolve('package.json'),'utf8');
+assert(!packageText.includes('playwright-core'),'Playwright voltou às dependências');
+
 for(const file of ['src/server.mjs','src/services/jobs.mjs','src/apply/rio.mjs']){
   const text=fs.readFileSync(path.resolve(file),'utf8');
   assert(!/from\s+['"]playwright-core['"]/.test(text),'Playwright voltou ao runtime ativo: '+file);

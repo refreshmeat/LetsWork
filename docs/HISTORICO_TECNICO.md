@@ -610,3 +610,19 @@ Valida��o ap�s a corre��o, em preview com o mesmo perfil e filtros pad
 ## 2026-09-29 — consolidação do pipeline Rio-only
 
 Refatoração do fluxo para inventário global de 30 dias, FTS5/BM25, isolamento candidato-vaga por `inventory_id`, candidatura HTTP dedicada ao RioVagas, recibos de envio, telemetria de execução e backup portátil. Playwright foi removido das dependências e as fontes antigas foram excluídas do build, permanecendo apenas como código de referência fora do runtime atual. A regressão cobre isolamento entre candidatos, janela 7/15/30, duplicidade, FTS, recibos e fonte única.
+
+## 2026-09-29 — limpeza definitiva da arquitetura anterior
+
+Após a validação do pipeline RioVagas-only, o legado deixou de ser apenas desativado e foi removido do projeto atual:
+
+- removidos `src/sources/*` e os adapters antigos de outras fontes;
+- removido `src/apply/engine.mjs`, que concentrava Playwright/Chromium e automação genérica;
+- a lógica ainda necessária para perguntas do formulário foi isolada em `src/apply/answers.mjs`;
+- Playwright não faz parte das dependências;
+- scripts antigos de build foram removidos; o build oficial é `npm run dist`;
+- builds locais, backups históricos, sessões de navegador, arquivos temporários e cópias antigas do LetsWork foram limpos;
+- o executável oficial local é `C:\Users\RefreshMeat\Desktop\LetsWork.exe`;
+- o diretório de dados ativo é `C:\Users\RefreshMeat\LetsWork\dados`;
+- a pasta `dados\backups` passa a manter apenas backup portátil do estado atual quando gerado.
+
+O histórico anterior deste documento permanece apenas como registro técnico das decisões e problemas encontrados. Ele não descreve fontes ou componentes ativos.

@@ -1,59 +1,104 @@
 # LetsWork
 
-Aplicação desktop local para importar currículos, identificar oportunidades compatíveis e automatizar candidaturas sem inventar dados do candidato.
+Aplicação desktop local para importar currículos, organizar o perfil profissional, encontrar vagas compatíveis e automatizar candidaturas sem inventar dados do candidato.
 
-## Fluxo atual
+## Arquitetura atual
 
-Cada candidato possui dados, buscas, histórico e candidaturas isolados por `candidate_id`.
+O LetsWork opera exclusivamente com o RioVagas nesta fase.
 
-1. O currículo original e os documentos de apoio são importados.
-2. O LetsWork extrai os fatos do candidato.
-3. Um currículo-base otimizado é gerado uma única vez.
-4. O currículo-base precisa existir antes de qualquer envio.
-5. A busca deriva um conjunto compacto de cargos compatíveis.
-6. Regras objetivas eliminam incompatibilidades antes da IA.
-7. A IA local analisa apenas os poucos casos realmente ambíguos.
-8. O mesmo currículo-base é reutilizado em todas as candidaturas.
+Fluxo:
 
-Não existe geração de currículo por vaga.
+1. Importa currículo e documentos de apoio.
+2. Extrai somente fatos presentes nos documentos e dados informados pelo candidato.
+3. Gera um currículo-base profissional e ATS-friendly, reutilizado nas candidaturas.
+4. Mantém um inventário global local de vagas do RioVagas com janela móvel de até 30 dias.
+5. Os filtros de 7, 15 e 30 dias são consultas locais no SQLite, sem nova busca na internet.
+6. FTS5/BM25 e regras objetivas reduzem o universo antes da IA.
+7. A IA local revisa apenas casos realmente ambíguos.
+8. A candidatura é revalidada imediatamente antes do envio.
+9. O envio ao RioVagas é feito diretamente por HTTP, sem login do candidato e sem automação de navegador.
+10. Uma candidatura só recebe status `SENT` quando existe confirmação positiva do RioVagas.
 
-Documentos de apoio e portfólios servem apenas como evidência factual. Eles não são anexados automaticamente ao currículo enviado. Projetos relevantes podem ser descritos na seção de projetos do currículo-base.
+## Currículo-base
 
-## Fonte de vagas
+Cada candidato possui um currículo-base otimizado por versão dos documentos. Não existe geração de um novo currículo para cada vaga.
 
-Durante a fase atual de validação, somente o RioVagas entra no fluxo automático. As demais integrações permanecem no projeto para serem validadas individualmente antes de serem ativadas.
+Modelos disponíveis:
 
-A coleta do RioVagas usa cache local e atualização incremental. A interface recebe imediatamente as vagas decididas por regras. Casos ambíguos podem terminar a revisão de IA em segundo plano sem bloquear a busca.
+- Executivo
+- Clássico
+- Compacto
 
-## IA local
+Portfólios e documentos de apoio são usados como evidência factual. Eles não são anexados automaticamente ao PDF enviado.
 
-O único provider de IA do runtime é o Ollama.
+## Banco local
 
-O desktop escolhe o modelo conforme o hardware. Em máquinas mais modestas usa Llama 3.2 3B; o Llama 3.1 8B só é escolhido quando há RAM e VRAM suficientes. É possível sobrescrever o modelo com `OLLAMA_MODEL`.
-
-A IA não é usada para inventar experiência, formação, ferramentas, resultados ou dados pessoais.
-
-## Envio
-
-RioVagas usa o caminho HTTP direto quando disponível. O Playwright fica reservado para sites/formulários que realmente precisam de navegador.
-
-O envio nunca volta silenciosamente ao currículo original. Se o currículo-base não existir, o lote é interrompido com erro explícito.
-
-## Dados
-
-Dados operacionais ficam em:
+Os dados operacionais ficam em:
 
 `C:\Users\RefreshMeat\LetsWork\dados`
 
-O banco SQLite, currículos, documentos, caches e relatórios não devem ser versionados.
+O SQLite mantém candidatos, documentos, histórico, inventário de vagas, associações candidato-vaga, recibos de candidatura e eventos de execução.
+
+O inventário do RioVagas é global. A mesma vaga não é duplicada para cada candidato.
+
+## Inventário RioVagas
+
+- Janela máxima: 30 dias.
+- Vagas novas entram automaticamente.
+- Vagas com mais de 30 dias saem.
+- Vagas encerradas deixam o inventário ativo.
+- Sincronização incremental ocorre durante o uso.
+- Uma reconciliação completa periódica corrige inclusões, alterações e encerramentos.
+- `external_id` do RioVagas preserva a identidade da vaga mesmo se a URL mudar.
+
+## Envio
+
+O fluxo ativo não contém Playwright, Chromium, Selenium nem login persistente.
+
+O adapter dedicado do RioVagas executa:
+
+`validar vaga → abrir formulário HTTP → preencher → anexar PDF → enviar → verificar confirmação → registrar recibo`
+
+Respostas sem confirmação segura ficam como `UNCERTAIN`, evitando duplicidade por retentativa automática.
+
+## IA
+
+A IA local usa Ollama. Regras factuais e filtros determinísticos têm prioridade.
+
+A IA não pode inventar experiência, formação, habilidades, endereço, documentos pessoais, disponibilidade ou credenciais.
+
+## Backup e troca de PC
+
+A interface permite exportar um backup portátil com:
+
+- banco SQLite;
+- currículos;
+- documentos dos candidatos;
+- histórico de candidaturas.
+
+Sessões de navegador não existem no fluxo atual e não fazem parte do backup.
+
+O inventário de vagas pode ser reconstruído pela sincronização do RioVagas.
 
 ## Verificação
 
-`npm run check` valida a sintaxe dos módulos principais.
+Comandos principais:
 
-`npm run smoke` executa verificações de regressão sobre isolamento de candidatos, integridade do banco e geração de currículo-base.
-## Arquitetura ativa: RioVagas
+- `npm run check`
+- `npm run smoke`
+- `npm run regression`
+- `npm run regression:live`
+- `npm run dist`
 
-Nesta fase, o LetsWork opera exclusivamente com RioVagas. O app mantém um inventário local global de até 30 dias, aplica filtros de 7/15/30 dias localmente, ranqueia por compatibilidade profissional e usa IA apenas para casos ambíguos. O envio é feito diretamente por HTTP, sem exigir login do candidato.
+`regression:live` valida um formulário real recente do RioVagas via HTTP sem enviar candidatura.
 
-Comandos de validação: `npm run check`, `npm run smoke`, `npm run regression` e `npm run regression:live`.
+## Estrutura
+
+- `src/apply/rio.mjs`: adapter HTTP do RioVagas.
+- `src/apply/answers.mjs`: respostas determinísticas/IA para perguntas do formulário.
+- `src/services/jobs.mjs`: sincronização do inventário RioVagas.
+- `src/services/inventory.mjs`: FTS5/BM25, associação candidato-vaga, métricas e eventos.
+- `src/services/ranking.mjs`: compatibilidade profissional.
+- `src/services/tailor.mjs`: geração do currículo-base.
+- `src/services/backup.mjs`: exportação e restauração portátil.
+- `src/server.mjs`: API local e orquestração.
