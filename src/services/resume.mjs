@@ -15,16 +15,40 @@ const preferredZipExt=['.docx','.pdf','.doc','.rtf','.odt','.txt','.png','.jpg',
 const asciiText=value=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 const ignoredNameWords=/\b(?:curriculo|curriculum|perfil|contato|formacao|experiencia|habilidades|competencias)\b/i;
 
+const cp1252Special=new Map([
+  ['€',0x80],['‚',0x82],['ƒ',0x83],['„',0x84],['…',0x85],['†',0x86],['‡',0x87],['ˆ',0x88],
+  ['‰',0x89],['Š',0x8a],['‹',0x8b],['Œ',0x8c],['Ž',0x8e],['‘',0x91],['’',0x92],['“',0x93],
+  ['”',0x94],['•',0x95],['–',0x96],['—',0x97],['˜',0x98],['™',0x99],['š',0x9a],['›',0x9b],
+  ['œ',0x9c],['ž',0x9e],['Ÿ',0x9f]
+]);
+function windows1252Bytes(value){
+  const bytes=[];
+  for(const ch of String(value||'')){
+    const code=ch.codePointAt(0);
+    if(code<=0xff){bytes.push(code);continue;}
+    const mapped=cp1252Special.get(ch);
+    if(mapped===undefined)return null;
+    bytes.push(mapped);
+  }
+  return Buffer.from(bytes);
+}
 function mojibakeScore(value){
   const s=String(value||'');
-  const patterns=[/Ã./g,/Â./g,/â[\u0080-\u00bf]{1,3}/g,/ð[\u0080-\u00bf]{1,3}/g,/ƒ\?/g,/Ç[\u0080-\u00ff]/g,/\uFFFD/g];
-  return patterns.reduce((sum,rx)=>sum+(s.match(rx)||[]).length,0);
+  const suspicious=(s.match(/[ÃÂâð]/g)||[]).length;
+  const cpArtifacts=(s.match(/[ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ]/g)||[]).length;
+  const replacement=(s.match(/\uFFFD/g)||[]).length;
+  return suspicious*4+cpArtifacts+replacement*20;
+}
+function decodeMojibakeOnce(value){
+  const bytes=windows1252Bytes(value);
+  if(!bytes)return '';
+  return bytes.toString('utf8');
 }
 export function repairTextEncoding(value){
   let current=String(value||'');
-  for(let i=0;i<3;i++){
-    if(!/[ÃÂâðƒÇ]/.test(current))break;
-    const next=Buffer.from(current,'latin1').toString('utf8');
+  for(let i=0;i<4;i++){
+    if(!/[ÃÂâð]/.test(current))break;
+    const next=decodeMojibakeOnce(current);
     if(!next||next.includes('\uFFFD'))break;
     if(mojibakeScore(next)>=mojibakeScore(current))break;
     current=next;
@@ -165,10 +189,11 @@ export function inferProfile(text){
     const format=digits=>{
       let d=String(digits||'');
       if((d.length===12||d.length===13)&&d.startsWith('55'))d=d.slice(2);
-      if(d.length!==10&&d.length!==11)return '';
+      if(![10,11,12].includes(d.length))return '';
       const ddd=d.slice(0,2),local=d.slice(2);
       if(Number(ddd)<11||Number(ddd)>99)return '';
-      return `(${ddd}) ${local.length===9?local.slice(0,5):local.slice(0,4)}-${local.slice(-4)}`;
+      const prefix=local.length===10?local.slice(0,6):(local.length===9?local.slice(0,5):local.slice(0,4));
+      return `(${ddd}) ${prefix}-${local.slice(-4)}`;
     };
     const head=lines.slice(0,50);
     const candidates=[
@@ -198,7 +223,7 @@ export function inferProfile(text){
   })();
   const links=[...clean.matchAll(/https?:\/\/[^\s)]+/g)].map(x=>x[0]);
   const normalizeWebUrl=value=>{const v=String(value||'').replace(/[),.;]+$/,'').trim();return v&&!/^https?:\/\//i.test(v)?'https://'+v:v;};
-  let linkedin=normalizeWebUrl(clean.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[A-Za-z0-9%._-]+/i)?.[0]||links.find(x=>/linkedin\.com/i.test(x))||'');
+  let linkedin=normalizeWebUrl(clean.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[\p{L}0-9%._-]+/iu)?.[0]||links.find(x=>/linkedin\.com/i.test(x))||'');
   if(!linkedin){
     const idx=lines.findIndex(x=>/(?:www\.)?linkedin\.com\/in\/\s*$/i.test(x));
     if(idx>=0){
@@ -209,6 +234,7 @@ export function inferProfile(text){
       }
     }
   }
+  linkedin=linkedin.replace(/linkedin\.com\/in\/([^/?#]+)/i,(_,slug)=>'linkedin.com/in/'+slug.normalize('NFD').replace(/[\u0300-\u036f]/g,''));
   const instagram=normalizeWebUrl(clean.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/[A-Za-z0-9._-]+/i)?.[0]||links.find(x=>/instagram\.com/i.test(x))||'');
   const portfolio=links.find(x=>!/linkedin\.com|instagram\.com/i.test(x))||'';
   const normalizedSkillText=lower.normalize('NFD').replace(/[\u0300-\u036f]/g,'');
@@ -233,25 +259,58 @@ export function inferProfile(text){
     const n=Number(m?.[1]||0);
     return n>=14&&n<100?String(n):'';
   })();
+  const cnhCategory=(()=>{
+    const m=clean.match(/\b(?:habilita(?:ção|cao)|cnh)(?:\s+categoria)?\s*[:\-]?\s*([ABCDE]{1,2})\b/i);
+    return String(m?.[1]||'').toUpperCase();
+  })();
   let address=labeled(/^(?:endereço|endereco|logradouro)\b/i);
   if(!address)address=lines.find(x=>/^(?:rua|avenida|av\.?|estrada|travessa|alameda|rodovia|praça|praca)\b/i.test(x))||'';
+  address=String(address||'')
+    .replace(/\s+\b(?:habilita(?:ção|cao)|cnh)(?:\s+categoria)?\s*[:\-]?\s*[ABCDE]{1,2}\b.*$/i,'')
+    .replace(/\s+\b(?:telefone|tel\.?|celular|whatsapp|contato|e-?mail)\s*[:\-].*$/i,'')
+    .trim();
+
   let neighborhood=labeled(/^(?:bairro)\b/i),residenceCity='',residenceState='';
+  const states='AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO';
+  const setFromLocation=value=>{
+    const v=String(value||'').trim();
+    let m=v.match(new RegExp('^(.{2,80}?),\\s*(.{2,80}?)\\s*[–—-]\\s*('+states+')(?:\\s*,?\\s*(?:BRASIL|BRAZIL))?$','iu'));
+    if(m){neighborhood=neighborhood||m[1].trim();residenceCity=m[2].trim();residenceState=m[3].toUpperCase();return true;}
+    m=v.match(new RegExp('^(.{2,80}?),\\s*('+states+')(?:\\s*,?\\s*(?:BRASIL|BRAZIL))?$','iu'));
+    if(m){residenceCity=m[1].trim();residenceState=m[2].toUpperCase();return true;}
+    m=v.match(new RegExp('^(.{2,80}?)\\s*[–—-]\\s*('+states+')(?:\\s*,?\\s*(?:BRASIL|BRAZIL))?$','iu'));
+    if(m){residenceCity=m[1].trim();residenceState=m[2].toUpperCase();return true;}
+    return false;
+  };
+
   if(!neighborhood&&address){
-    const parts=address.split(/\s+[\-–—]\s+/).map(x=>x.trim()).filter(Boolean);
-    for(let i=parts.length-1;i>0;i--){
-      const part=parts[i];
-      if(part&&!/^(?:rio de janeiro|rj|brasil|brazil)$/i.test(part)){neighborhood=part;break;}
+    const tail=address.match(/\s[–—-]\s*([^,]{2,60})$/u)?.[1]?.trim()||'';
+    if(tail&&!new RegExp('^(?:'+states+'|BRASIL|BRAZIL)$','i').test(tail))neighborhood=tail;
+  }
+  setFromLocation(address);
+  if(!residenceCity||!residenceState){
+    const header=[];
+    for(const line of lines.slice(0,25)){
+      if(/^(?:resumo|perfil profissional|formação|formacao|experiência|experiencia|hist[oó]rico profissional)\b/i.test(line))break;
+      header.push(line);
+    }
+    const preferred=[
+      ...header.filter(x=>/endereço|endereco|logradouro|bairro|resid/i.test(x)),
+      ...header.filter(x=>new RegExp(',\\s*(?:'+states+')(?:\\b|\\s*,)','i').test(x)),
+      ...header.filter(x=>new RegExp('\\s[–—-]\\s*(?:'+states+')\\b','i').test(x))
+    ];
+    for(const line of preferred){
+      const cleanLine=String(line)
+        .replace(/^(?:endereço|endereco|logradouro|bairro|resid[eê]ncia)\s*[:\-]?\s*/i,'')
+        .replace(/\s+\b(?:habilita(?:ção|cao)|cnh)(?:\s+categoria)?\s*[:\-]?\s*[ABCDE]{1,2}\b.*$/i,'')
+        .trim();
+      if(setFromLocation(cleanLine))break;
     }
   }
-  const states='AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO';
-  for(const line of lines){
-    let m=line.match(new RegExp('^('+states+')\\s*[-–—]\\s*([^–—-]+?)(?:\\s*[-–—]\\s*(.+))?$','iu'));
-    if(m){residenceState=m[1].toUpperCase();residenceCity=m[2].trim();if(!neighborhood&&m[3])neighborhood=m[3].trim();break;}
-    m=line.match(new RegExp('^(.{2,60}?),\\s*('+states+')(?:,\\s*(?:BRASIL|BRAZIL))?$','i'));
-    if(m&&!/@|https?:|www\./i.test(line)){residenceCity=m[1].trim();residenceState=m[2].toUpperCase();break;}
-    m=line.match(new RegExp('^(.{2,60}?)\\s*[-–—/]\\s*('+states+')(?:,\\s*(?:BRASIL|BRAZIL))?$','iu'));
-    if(m&&!/@|https?:|www\./i.test(line)){residenceCity=m[1].trim();residenceState=m[2].toUpperCase();break;}
+  if(!neighborhood&&address&&residenceCity){
+    const first=address.split(',')[0]?.trim();
+    if(first&&asciiText(first)!==asciiText(residenceCity))neighborhood=first;
   }
   return {name:guessName(raw),email,phone,linkedin,portfolio,instagram,skills,rawText:raw,
-    cpf,birthDate,age,nationality,naturality,cep,address,neighborhood,residenceCity,residenceState,additionalFacts:''};
+    cpf,birthDate,age,nationality,naturality,cep,address,neighborhood,residenceCity,residenceState,cnhCategory,additionalFacts:''};
 }

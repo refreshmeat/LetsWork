@@ -26,15 +26,21 @@ DADOS E BANCO DE VAGAS
 - Cada computador cria seus proprios dados em:
   %USERPROFILE%\LetsWork\dados
 - O banco SQLite local e criado automaticamente no novo computador.
-- Na primeira abertura, o LetsWork faz uma sincronizacao completa do RioVagas.
-- Enquanto o programa estiver aberto, o inventario recebe manutencao automatica a cada hora.
+- Na primeira abertura, o LetsWork sincroniza o inventario do RioVagas.
+- Enquanto o programa estiver aberto, o inventario recebe manutencao automatica.
 - Uma nova reconciliacao completa ocorre quando a ultima reconciliacao tiver 24 horas ou mais.
 - Ao abrir novamente, o LetsWork sincroniza o inventario antes de iniciar uma busca.
 
-USO DA v0.1
+CURRICULOS
+- Todo curriculo otimizado passa pelo mesmo pipeline automatico.
+- Telefone/WhatsApp, e-mail, bairro, cidade, estado, CNH e LinkedIn sao separados e normalizados.
+- O curriculo-base final ocupa uma pagina.
+- Secoes duplicadas ou dados inconsistentes bloqueiam a geracao em vez de salvar um PDF defeituoso.
+
+USO DA v0.1.0
 - Fonte de vagas: RioVagas.
 - A candidatura real passa por pre-voo antes do envio.
 - SENT so e exibido quando existe confirmacao positiva persistida.
 
 VERSAO
-LetsWork 0.1.0
+LetsWork 0.1.0 FINAL

@@ -264,6 +264,7 @@ app.post('/api/resume/:id/optimize-base',async(req,res)=>{
     const template=['executive','classic','compact'].includes(String(req.body?.template||''))?String(req.body.template):String(row.base_resume_template||'executive');
     const result=await optimizeBaseResume(row.stored_path,profile,focus,template);
     if(row.base_resume_path&&row.base_resume_path!==result.file){try{fs.rmSync(row.base_resume_path,{force:true});}catch{}}
+    if(result.normalizedProfile)db.prepare('UPDATE resumes SET profile_json=? WHERE id=?').run(JSON.stringify(result.normalizedProfile),id);
     db.prepare('UPDATE resumes SET base_resume_path=?,base_resume_text=?,base_resume_focus=?,base_resume_template=?,base_resume_updated_at=CURRENT_TIMESTAMP WHERE id=?').run(result.file,result.text||'',result.focus||focus,result.template||template,id);
     db.prepare('UPDATE candidates SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(row.candidate_id);
     const updated=getResume(id);
@@ -390,6 +391,7 @@ app.post('/api/search', async (req,res) => {
       const baseProfile={...profile,supportDocuments};
       const baseFocus=String(filters.area||profile.desiredArea||'').trim();
       const base=await optimizeBaseResume(resume.stored_path,baseProfile,baseFocus,resume.base_resume_template||'executive');
+      if(base.normalizedProfile)db.prepare('UPDATE resumes SET profile_json=? WHERE id=?').run(JSON.stringify(base.normalizedProfile),resume.id);
       db.prepare('UPDATE resumes SET base_resume_path=?,base_resume_text=?,base_resume_focus=?,base_resume_template=?,base_resume_updated_at=CURRENT_TIMESTAMP WHERE id=?').run(base.file,base.text||'',base.focus||baseFocus,base.template||resume.base_resume_template||'executive',resume.id);
       db.prepare('UPDATE candidates SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(resume.candidate_id);
       resume=getResume(resume.id);

@@ -3,7 +3,7 @@ import path from 'path';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { askAI, parseJsonLoose } from './ai.mjs';
-import { extractText, repairTextEncoding } from './resume.mjs';
+import { extractText, repairTextEncoding, inferProfile } from './resume.mjs';
 import { runtime } from '../runtime.mjs';
 
 function outputDir(source){
@@ -171,7 +171,7 @@ function wrapText(font,text,size,maxWidth){
   return lines;
 }
 const RESUME_TEMPLATES={
-  executive:{accent:[.08,.16,.25],ink:[.07,.08,.10],muted:[.36,.40,.44],line:[.80,.83,.86],margin:46,nameSize:24,targetSize:11.2,sectionSize:10.4,bodySize:10.1,leading:14.0,itemGap:5},
+  executive:{accent:[.08,.16,.25],ink:[.07,.08,.10],muted:[.36,.40,.44],line:[.80,.83,.86],margin:42,nameSize:25,targetSize:11.5,sectionSize:10.6,bodySize:10.3,leading:14.5,itemGap:6},
   classic:{accent:[.10,.10,.10],ink:[.07,.07,.07],muted:[.38,.38,.38],line:[.78,.78,.78],margin:48,nameSize:23,targetSize:11,sectionSize:10.2,bodySize:10.0,leading:13.8,itemGap:5},
   compact:{accent:[.13,.18,.23],ink:[.07,.08,.09],muted:[.40,.42,.45],line:[.83,.85,.87],margin:40,nameSize:21,targetSize:10.5,sectionSize:9.7,bodySize:9.3,leading:12.4,itemGap:3}
 };
@@ -187,13 +187,17 @@ function resumeLocation(profile={}){
 }
 function parseExperienceEntry(value){
   const text=String(value||'').replace(/\s+/g,' ').trim();
-  const m=text.match(/^(.+?)\s+[—–-]\s+(.+?)\s*\|\s*([^:]+?)(?::\s*(.*))?$/);
-  if(!m)return {company:'',role:'',dates:'',details:[],raw:text};
+  const pipe=text.indexOf(' | ');
+  if(pipe<0)return {company:'',role:'',dates:'',details:[],raw:text};
+  const left=text.slice(0,pipe).trim(),right=text.slice(pipe+3).trim();
+  const pos=left.lastIndexOf(' - ');
+  if(pos<0)return {company:'',role:'',dates:'',details:[],raw:text};
+  const rest=right.match(/^([^:]+?)(?::\s*(.*))?$/);
   return {
-    company:m[1].trim(),
-    role:m[2].trim(),
-    dates:m[3].trim(),
-    details:String(m[4]||'').split(/\s*;\s*/).map(x=>x.replace(/[.;]+$/,'').trim()).filter(Boolean).slice(0,4),
+    company:left.slice(0,pos).trim(),
+    role:left.slice(pos+3).trim(),
+    dates:String(rest?.[1]||'').trim(),
+    details:String(rest?.[2]||'').split(/\s*;\s*/).map(x=>x.replace(/[.;]+$/,'').trim()).filter(Boolean).slice(0,4),
     raw:text
   };
 }
@@ -260,7 +264,7 @@ async function renderResumePdf(source,job,profile,content,template='executive'){
       for(const ln of titleLines){page.drawText(ln,{x:margin,y,size:titleSize,font:bold,color:ink});y-=style.leading;}
       if(item.dates&&titleLines.length===1)drawRight(item.dates,9.1,regular,muted,y+style.leading);
       else if(item.dates){page.drawText(item.dates,{x:margin,y,size:9.1,font:regular,color:muted});y-=11.5;}
-      for(const detail of item.details.slice(0,3)){
+      for(const detail of item.details.slice(0,4)){
         ensure(20);page.drawCircle({x:margin+2.3,y:y+3,size:1.05,color:accent});
         drawLines(detail,style.bodySize-.15,regular,ink,10,style.leading-.2);y-=1;
       }
@@ -319,7 +323,7 @@ async function renderResumePdf(source,job,profile,content,template='executive'){
   }
 
   if(content.courses?.length){
-    section('Cursos complementares');simpleItems(content.courses,6);
+    section('Cursos complementares');simpleItems(content.courses,8);
   }
   if(hasExperience&&content.projects?.length){
     section('Projetos selecionados');projectItems(content.projects);
@@ -349,7 +353,14 @@ async function validateGeneratedPdf(file,profile,content){
   if(text.length<220)throw new Error('Currículo personalizado gerado com conteúdo insuficiente');
   if(profile.name&&!norm(text).includes(norm(profile.name)))throw new Error('Currículo personalizado perdeu o nome do candidato');
   if(/resumo direcionado [àa] vaga|curr[ií]culo original completo est[aá] nas p[aá]ginas seguintes/i.test(text))throw new Error('Formato antigo de capa detectado e bloqueado');
-  if(doc.numPages>3)throw new Error('Currículo personalizado excedeu 3 páginas');
+  if(doc.numPages>2)throw new Error('Currículo personalizado excedeu 2 páginas');
+  const sectionCount=label=>(norm(text).match(new RegExp(norm(label),'g'))||[]).length;
+  if(sectionCount('Experiência profissional')>1)throw new Error('Currículo repetiu a seção de experiência profissional');
+  if(sectionCount('Formação acadêmica')>1)throw new Error('Currículo repetiu a seção de formação acadêmica');
+  const textDigits=text.replace(/\D/g,'');
+  const phoneDigits=String(profile.phone||'').replace(/\D/g,'');
+  if(phoneDigits&&phoneDigits.length>=10&&!textDigits.includes(phoneDigits))throw new Error('Currículo perdeu o telefone/WhatsApp do candidato');
+  if(profile.email&&!norm(text).includes(norm(profile.email)))throw new Error('Currículo perdeu o e-mail do candidato');
   if(content.target&&!norm(text).includes(norm(content.target).slice(0,Math.min(18,norm(content.target).length))))throw new Error('Objetivo da vaga não apareceu no currículo personalizado');
   return {pages:doc.numPages,chars:text.length,text};
 }
@@ -362,15 +373,7 @@ function baseSplitSource(raw){
   return {primary:idx>=0?text.slice(0,idx):text,support:idx>=0?text.slice(idx):''};
 }
 function basePrettyText(value){
-  let s=String(value||'').replace(/\s+/g,' ').trim();
-  const badCount=x=>(String(x).match(/(?:Ã.|Â.|â.|ð.|�)/g)||[]).length;
-  if(badCount(s)){
-    for(let i=0;i<2;i++){
-      const repaired=Buffer.from(s,'latin1').toString('utf8');
-      if(!repaired||repaired.includes('\uFFFD')||badCount(repaired)>=badCount(s))break;
-      s=repaired;
-    }
-  }
+  let s=repairTextEncoding(value).replace(/\s+/g,' ').trim();
   s=s.replace(/\(\s+/g,'(').replace(/\s+\)/g,')');
   s=s.replace(/^[•·▪◦]\s*/u,'');
   s=s.replace(/\bexperiencia do usuario\b/ig,'Experiência do Usuário');
@@ -389,9 +392,9 @@ function baseLines(text){
 function baseSectionName(line){
   const n=norm(basePrettyText(line)).replace(/[^a-z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
   if(/^(?:formacoes?|formacao academica|educacao|escolaridade)$/.test(n))return 'education';
-  if(/^(?:experiencias? profissionais?|historico profissional|experiencias?)$/.test(n))return 'experience';
-  if(/^(?:habilidades(?: e competencias)?|competencias|skills?)$/.test(n))return 'skills';
-  if(/^(?:certificacoes?(?: e)? idiomas?|certificados?(?: e)? idiomas?|cursos?(?: complementares?)?|idiomas?)$/.test(n))return 'certs';
+  if(/^(?:experiencias? profission(?:al|ais)|historico profissional|experiencias?)$/.test(n))return 'experience';
+  if(/^(?:habilidades(?: principais| e competencias)?|competencias(?: principais)?|skills?)$/.test(n))return 'skills';
+  if(/^(?:qualificacoes?(?: e)? cursos?(?: complementares?)?|certificacoes?(?: e)? idiomas?|certificados?(?: e)? idiomas?|cursos?(?: complementares?)?|idiomas?)$/.test(n))return 'certs';
   if(/^(?:informacoes adicionais|dados adicionais|outros)$/.test(n))return 'additional';
   if(/^(?:projetos?|portfolio)$/.test(n))return 'projects';
   if(/^(?:objetivo profissional|objetivo|resumo profissional|perfil profissional|sobre mim)$/.test(n))return 'summary';
@@ -510,9 +513,16 @@ function baseEducationData(primary){
     return 1;
   };
   education.sort((a,b)=>eduScore(b)-eduScore(a));
+  for(const rawLine of certs){
+    const clean=basePrettyText(rawLine),n=norm(clean);
+    if(!clean||baseSectionName(clean)||baseIsAcademic(n)||baseIsStatus(n)||baseIsLanguage(n))continue;
+    if(/:\s*$/.test(clean)&&clean.length<90)continue;
+    if(clean.length<4||clean.length>150)continue;
+    if(!courses.some(x=>norm(x)===n))courses.push(clean);
+  }
   return {
     education:[...new Set(education)].slice(0,6),
-    courses:[...new Set(courses)].slice(0,6),
+    courses:[...new Set(courses)].slice(0,8),
     languages:[...new Set(languages)].slice(0,4)
   };
 }
@@ -596,8 +606,8 @@ function baseExperience(raw){
         if(maybeCompany)details.push(maybeCompany);
         j++;
       }
-      const detailText=details.slice(0,3).map(x=>x.replace(/[.;]\s*$/,'')).join('; ');
-      out.push(`${company} — ${next}${detailText?`: ${detailText}`:''}`);
+      const detailText=details.slice(0,4).map(x=>x.replace(/[.;]\s*$/,'')).join('; ');
+      out.push(`${company} - ${next}${detailText?`: ${detailText}`:''}`);
       i=j;
       continue;
     }
@@ -618,6 +628,24 @@ function baseSplitEntry(entry){
   const pos=left.lastIndexOf(' - ');
   return {title:pos>=0?left.slice(0,pos):left,institution:pos>=0?left.slice(pos+3):'',status};
 }
+function baseTargetFromSource(raw,requested=''){
+  const req=basePrettyText(requested).slice(0,110);
+  const nr=norm(req);
+  const generic=!req||/^(?:perfil profissional|objetivo profissional|curriculo|currículo|candidato)$/.test(nr)
+    ||/\|\s*\d|habilidades principais|experiencia profissional|formacao academica/.test(nr);
+  if(!generic)return req;
+  const {primary}=baseSplitSource(raw);
+  const sections=baseSections(primary);
+  const expLine=(sections.experience||[]).find(x=>/\|\s*\d{1,2}\/\d{4}/.test(x))||'';
+  const role=basePrettyText(expLine.split('|')[0]||'').replace(/^[–—-]+|[–—-]+$/g,'').trim();
+  const eduLine=(sections.education||[]).find(x=>/graduacao em|bacharel|tecnologo|licenciatura/i.test(norm(x)))||'';
+  const subject=basePrettyText(eduLine)
+    .replace(/^.*?\b(?:graduacao|graduação|bacharelado|tecnologo|tecnólogo|licenciatura)\s+(?:em\s+)?/i,'')
+    .replace(/\s+[–—-].*$/,'').trim();
+  if(role&&subject&&!norm(role).includes(norm(subject))&&!norm(subject).includes(norm(role)))return `${role} | ${subject}`.slice(0,110);
+  return (role||subject||'Perfil profissional').slice(0,110);
+}
+
 function baseSummary(content){
   const sentences=[];
   const higher=(content.education||[]).find(x=>/bacharel|graduacao|licenciatura|tecnologo|mestrado|doutorado|pos/.test(norm(x)));
@@ -625,7 +653,8 @@ function baseSummary(content){
   const tools=(content.skills||[]).filter(x=>!/^(Design|UX\/UI)$/i.test(x)).slice(0,4);
 
   if((content.experience||[]).length){
-    sentences.push(`Profissional com experiência em ${content.target.charAt(0).toLowerCase()+content.target.slice(1)}.`);
+    const firstRole=parseExperienceEntry(content.experience[0]||'').role||String(content.target||'').split('|')[0].trim();
+    sentences.push(firstRole?`Profissional com experiência como ${firstRole}.`:'Profissional com experiência comprovada.');
     const areas=[];
     if(/atendimento|publico|cliente/.test(expText))areas.push('atendimento ao público');
     if(/administrativ|document|planilha|registro/.test(expText))areas.push('rotinas administrativas');
@@ -697,6 +726,12 @@ function baseContentLocal(raw,profile,target){
   content.summary=baseSummary(content);
   return content;
 }
+export function debugBaseResumeContent(raw,profile={},focus=''){
+  const sourceText=repairTextEncoding(raw||'');
+  const {primary}=baseSplitSource(sourceText);
+  const target=baseTargetFromSource(sourceText,focus||profile?.desiredArea||'');
+  return {sourceText,sections:baseSections(primary),target,content:baseContentLocal(sourceText,profile,target)};
+}
 async function basePolishSummary(content,raw,profile){
   if(process.env.LETSWORK_BASE_AI_POLISH!=='1')return content.summary;
   const facts={
@@ -720,15 +755,28 @@ async function basePolishSummary(content,raw,profile){
 export async function optimizeBaseResume(source,profile,focus='',template='executive'){
   let sourceText=repairTextEncoding(profile?.rawText||'');
   if(sourceText.length<120)sourceText=await extractText(source);
+  sourceText=repairTextEncoding(sourceText);
   if(sourceText.length<120)throw new Error('Nao foi possivel extrair conteudo factual suficiente do curriculo');
 
-  const target=basePrettyText(focus||profile?.desiredArea||'Perfil profissional').slice(0,110)||'Perfil profissional';
-  const content=baseContentLocal(sourceText,profile||{},target);
-  content.summary=await basePolishSummary(content,sourceText,profile||{});
+  const inferred=inferProfile(sourceText);
+  const effectiveProfile={...(profile||{}),rawText:sourceText};
+  for(const [key,value] of Object.entries(effectiveProfile)){
+    if(typeof value==='string')effectiveProfile[key]=repairTextEncoding(value);
+  }
+  for(const key of ['email','phone','linkedin','portfolio','instagram','address','neighborhood','residenceCity','residenceState','cnhCategory']){
+    if(String(inferred?.[key]||'').trim())effectiveProfile[key]=inferred[key];
+  }
+  effectiveProfile.name=repairTextEncoding(effectiveProfile.name||inferred.name||'');
+  effectiveProfile.skills=[...new Set([...(Array.isArray(profile?.skills)?profile.skills:[]),...(inferred.skills||[])].map(x=>repairTextEncoding(String(x||'')).trim()).filter(Boolean))];
+
+  const target=baseTargetFromSource(sourceText,focus||effectiveProfile.desiredArea||'');
+  const content=baseContentLocal(sourceText,effectiveProfile,target);
+  content.summary=await basePolishSummary(content,sourceText,effectiveProfile);
 
   const templateName=resumeTemplateName(template);
-  const resumeFile=await renderResumePdf(source,{id:'base',title:target},profile||{},content,templateName);
-  const resumeValidation=await validateGeneratedPdf(resumeFile,profile||{},content);
+  const resumeFile=await renderResumePdf(source,{id:'base',title:target},effectiveProfile,content,templateName);
+  const resumeValidation=await validateGeneratedPdf(resumeFile,effectiveProfile,content);
+  if(resumeValidation.pages!==1)throw new Error('Currículo-base executivo deve ocupar exatamente 1 página');
   const finalPath=path.join(outputDir(source),'curriculo_base_otimizado.pdf');
   if(path.resolve(resumeFile)!==path.resolve(finalPath)){
     fs.copyFileSync(resumeFile,finalPath);
@@ -743,6 +791,7 @@ export async function optimizeBaseResume(source,profile,focus='',template='execu
     template:templateName,
     changed:1,
     content,
+    normalizedProfile:Object.fromEntries(Object.entries(effectiveProfile).filter(([key])=>key!=='supportDocuments')),
     portfolioFiles:[],
     validation:{
       resumePages:resumeValidation.pages,

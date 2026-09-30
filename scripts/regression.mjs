@@ -5,7 +5,7 @@ import { queryRioInventory, sourceRegistry } from '../src/services/inventory.mjs
 import { prefilterJobsForAI } from '../src/services/ranking.mjs';
 import { rioLocation } from '../src/services/jobs.mjs';
 import { knownAnswer, aiAnswers, canonicalFormQuestionKey, accessDestination } from '../src/apply/answers.mjs';
-import { inferProfile } from '../src/services/resume.mjs';
+import { inferProfile, repairTextEncoding } from '../src/services/resume.mjs';
 import { applyRioVagasDirect, parseRioFormHtml, invalidQuestionShape } from '../src/apply/rio.mjs';
 
 function assert(condition,message){
@@ -165,6 +165,10 @@ assert(/Ensino Médio/i.test(String(knownAnswer('Qual a sua escolaridade ?',synt
 assert(/Tanque|Rio de Janeiro/i.test(String(knownAnswer('Em qual cidade e bairro você reside?',syntheticMaria,mariaPrefs)||'')),'Cidade/bairro conhecidos deixaram de ser reconhecidos');
 const languageAnswers=await aiAnswers([{id:'1',question:'Tem Inglês intermediário',options:['Sim','Não']}],syntheticMaria,mariaPrefs,null);
 assert(languageAnswers.get('1')==='Não','Nível de idioma inferior ao exigido não foi respondido com segurança');
+const repairedEncoding=repairTextEncoding('FORMAÃ‡ÃƒO ACADÃŠMICA\\nEXPERIÃŠNCIA PROFISSIONAL\\nHABILIDADES PRINCIPAIS\\nQUALIFICAÃ‡Ã•ES E CURSOS COMPLEMENTARES');
+assert(/FORMAÇÃO ACADÊMICA/.test(repairedEncoding),'Normalizador global não reparou Formação Acadêmica');
+assert(/EXPERIÊNCIA PROFISSIONAL/.test(repairedEncoding),'Normalizador global não reparou Experiência Profissional');
+assert(/QUALIFICAÇÕES E CURSOS COMPLEMENTARES/.test(repairedEncoding),'Normalizador global não reparou Qualificações/Cursos');
 const syntheticContactProfile=inferProfile('CRISTIANO TESTE\n( 21) 99042 â€“ 8876\ncristiano@example.com\nRio de Janeiro, RJ, Brasil');
 assert(syntheticContactProfile.phone==='(21) 99042-8876','Telefone com travessão/pontuação não foi normalizado');
 assert(syntheticContactProfile.email==='cristiano@example.com','E-mail sintético deixou de ser extraído');
@@ -180,6 +184,12 @@ assert(inferredContactProfile.age==='33','Idade explícita do currículo deixou 
 assert(/PRAÇA SECA/i.test(inferredContactProfile.neighborhood),'Bairro no final do endereço deixou de ser extraído');
 assert(inferredContactProfile.nationality==='Brasileira','Nacionalidade padrão brasileira deixou de ser aplicada');
 assert(!String(inferredContactProfile.naturality||'').trim(),'Naturalidade foi inferida indevidamente a partir da residência');
+const syntheticLiviaProfile=inferProfile('LÍVIA SANTIAGO MESSNER\nContato: (21) 996640-7024 | livia@example.com\nEndereço: Barra de Guaratiba, Rio de Janeiro – RJ Habilitação: B\nPerfil: linkedin.com/in/livia\nRESUMO PROFISSIONAL\nProfissional graduada em Gestão Hospitalar.\nEXPERIÊNCIA PROFISSIONAL\nDETRAN - RJ\nAuxiliar Administrativo | 07/2013 – 03/2014');
+assert(syntheticLiviaProfile.phone==='(21) 996640-7024','WhatsApp/telefone da Lívia deixou de ser extraído');
+assert(syntheticLiviaProfile.neighborhood==='Barra de Guaratiba','Bairro da Lívia foi contaminado por estado/CNH');
+assert(syntheticLiviaProfile.residenceCity==='Rio de Janeiro','Cidade da Lívia foi contaminada por experiência profissional');
+assert(syntheticLiviaProfile.residenceState==='RJ','Estado da Lívia deixou de ser extraído');
+assert(syntheticLiviaProfile.cnhCategory==='B','CNH da Lívia deixou de ser separada do endereço');
 const explicitForeign=inferProfile('CANDIDATO TESTE\nNacionalidade: Portuguesa\nNaturalidade: Lisboa\nRio de Janeiro, RJ, Brasil');
 assert(explicitForeign.nationality==='Portuguesa','Nacionalidade explícita deixou de prevalecer sobre o padrão');
 assert(explicitForeign.naturality==='Lisboa','Naturalidade explícita deixou de ser preservada');
