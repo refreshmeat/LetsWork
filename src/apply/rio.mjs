@@ -20,6 +20,50 @@ function tagAttr(tag,name){
   const m=String(tag||'').match(new RegExp('\\b'+name+'\\s*=\\s*(["\\\'])(.*?)\\1','i'));
   return m?htmlDecode(m[2]):'';
 }
+function candidateFormHtml(html){
+  const forms=[...String(html||'').matchAll(/<form\b[^>]*>[\s\S]*?<\/form>/gi)].map(x=>x[0]);
+  return forms.find(x=>/name=["']candidato_vaga_nonce_field["']/i.test(x))||String(html||'');
+}
+function selectOptions(block){
+  return [...String(block||'').matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/gi)]
+    .map(m=>htmlDecode(tagAttr('<option '+m[1]+'>','value')||String(m[2]||'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim()))
+    .filter(Boolean);
+}
+function formSchema(formHtml){
+  const inputs=[...String(formHtml||'').matchAll(/<input\b[^>]*>/gi)].map(x=>x[0]);
+  const selects=[...String(formHtml||'').matchAll(/<select\b[^>]*>[\s\S]*?<\/select>/gi)].map(x=>x[0]);
+  const textareas=[...String(formHtml||'').matchAll(/<textarea\b[^>]*>[\s\S]*?<\/textarea>/gi)].map(x=>x[0]);
+  const controls=[];
+  for(const tag of inputs){
+    const name=tagAttr(tag,'name');if(!name)continue;
+    controls.push({kind:'input',type:(tagAttr(tag,'type')||'text').toLowerCase(),name,value:tagAttr(tag,'value'),required:/\srequired(?:\s|=|>|\/)/i.test(tag)});
+  }
+  for(const tag of selects){
+    const open=tag.match(/^<select\b[^>]*>/i)?.[0]||tag,name=tagAttr(open,'name');if(!name)continue;
+    controls.push({kind:'select',type:'select',name,value:'',required:/\srequired(?:\s|=|>|\/)/i.test(open),options:selectOptions(tag)});
+  }
+  for(const tag of textareas){
+    const open=tag.match(/^<textarea\b[^>]*>/i)?.[0]||tag,name=tagAttr(open,'name');if(!name)continue;
+    controls.push({kind:'textarea',type:'textarea',name,value:'',required:/\srequired(?:\s|=|>|\/)/i.test(open)});
+  }
+  const known=name=>[
+    'ciente','ciente_email','candidato_vaga_nonce_field','_wp_http_referer','post_id',
+    'nome_candidato','email_candidato','celular_candidato','telefone_candidato','forma_envio','anexo',
+    'curriculo_candidato','pretensao_salarial','apresentacao_candidato','form_submit'
+  ].includes(name)||/^perguntas\[[^\]]+\]$/.test(name)||/^respostas\[[^\]]+\]$/.test(name);
+  const unsupportedRequired=[...new Set(controls.filter(x=>x.required&&!known(x.name)).map(x=>x.name))];
+  const signature=createHash('sha256').update(JSON.stringify(controls.map(x=>({
+    kind:x.kind,type:x.type,name:x.name,required:Boolean(x.required),options:x.options||[]
+  })).sort((a,b)=>(a.name+a.type).localeCompare(b.name+b.type)))).digest('hex').slice(0,16);
+  return {
+    controls,
+    hasAttachment:controls.some(x=>x.name==='anexo'&&x.type==='file'),
+    hasTextResume:controls.some(x=>x.name==='curriculo_candidato'),
+    deliveryOptions:controls.filter(x=>x.name==='forma_envio').map(x=>x.value).filter(Boolean),
+    unsupportedRequired,
+    signature
+  };
+}
 function closedError(message){
   const e=new Error(message);e.code='RIO_CLOSED';return e;
 }
@@ -39,38 +83,55 @@ function pageLooksClosed(html,url=''){
   const text=norm(htmlDecode(String(html||'').replace(/<[^>]+>/g,' ')));
   return /\/vaga-encerrada\//i.test(String(url||''))||/vaga encerrada|esta vaga foi encerrada|processo seletivo encerrado|vaga nao esta mais disponivel/.test(text);
 }
-export async function resolveRioApplyForm(job){
+export function parseRioFormHtml(html,applyUrl){
+  const formHtml=candidateFormHtml(html);
+  const schema=formSchema(formHtml);
+  const tags=schema.controls.filter(x=>x.kind==='input');
+  const nonceTag=tags.find(t=>t.name==='candidato_vaga_nonce_field')||{};
+  const postTag=tags.find(t=>t.name==='post_id')||{};
+  const refTag=tags.find(t=>t.name==='_wp_http_referer')||{};
+  const questions=[];
+  for(const t of tags){
+    const m=String(t.name||'').match(/^perguntas\[([^\]]+)\]$/);
+    if(!m)continue;
+    const id=m[1],question=t.value||'';
+    const answerControls=schema.controls.filter(x=>x.name===('respostas['+id+']'));
+    const options=[...new Set(answerControls.flatMap(x=>x.options?.length?x.options:(x.value?[x.value]:[])).filter(Boolean))];
+    questions.push({id,question,options,required:answerControls.some(x=>x.required),controlTypes:[...new Set(answerControls.map(x=>x.type))]});
+  }
+  const url=new URL(applyUrl);
+  const postId=postTag.value||url.searchParams.get('vaga')||'';
+  const nonce=nonceTag.value||'';
+  if(!postId||!nonce)throw closedError('RioVagas: formulário ativo não pôde ser validado');
+  return {html:formHtml,nonce,postId,referer:refTag.value||url.pathname+url.search,questions,schema};
+}
+
+export async function resolveRioApplyForm(job,{timeout=10000,attempts=3}={}){
   let applyUrl=/\/enviar-curriculo-gratis\//i.test(String(job?.url||''))?String(job.url):'';
   if(!applyUrl){
-    const r=await fetchRioGet(job.url,{timeout:10000,attempts:3});
+    const r=await fetchRioGet(job.url,{timeout,attempts});
     const html=await r.text();
     if([404,410].includes(r.status)||pageLooksClosed(html,r.url))throw closedError('RioVagas: vaga encerrada ou removida');
     const m=html.match(/href=["']([^"']*enviar-curriculo-gratis\/?\?vaga=[^"'#]+)["']/i);
     if(!m?.[1])throw closedError('RioVagas: vaga não possui mais formulário ativo de candidatura');
     applyUrl=new URL(htmlDecode(m[1]),r.url||job.url).toString();
   }
-  const r=await fetchRioGet(applyUrl,{timeout:10000,attempts:3});
+  const r=await fetchRioGet(applyUrl,{timeout,attempts});
   const html=await r.text();
   if([404,410].includes(r.status)||pageLooksClosed(html,r.url))throw closedError('RioVagas: formulário da vaga foi encerrado');
   if(!r.ok)throw new Error('RioVagas: formulário respondeu HTTP '+r.status);
-  const tags=[...html.matchAll(/<input\b[^>]*>/gi)].map(x=>x[0]);
-  const nonceTag=tags.find(t=>tagAttr(t,'name')==='candidato_vaga_nonce_field')||'';
-  const postTag=tags.find(t=>tagAttr(t,'name')==='post_id')||'';
-  const refTag=tags.find(t=>tagAttr(t,'name')==='_wp_http_referer')||'';
-  const questions=[];
-  for(const t of tags){
-    const name=tagAttr(t,'name'),m=name.match(/^perguntas\[(\d+)\]$/);
-    if(!m)continue;
-    const id=m[1],question=tagAttr(t,'value');
-    const answerTags=tags.filter(x=>tagAttr(x,'name')===('respostas['+id+']'));
-    const options=answerTags.map(x=>tagAttr(x,'value')).filter(Boolean);
-    questions.push({id,question,options});
-  }
-  const postId=tagAttr(postTag,'value')||new URL(applyUrl).searchParams.get('vaga')||'';
-  const nonce=tagAttr(nonceTag,'value');
-  if(!postId||!nonce)throw closedError('RioVagas: formulário ativo não pôde ser validado');
-  return {applyUrl,html,nonce,postId,referer:tagAttr(refTag,'value')||new URL(applyUrl).pathname+new URL(applyUrl).search,questions};
+  return {applyUrl,...parseRioFormHtml(html,applyUrl)};
 }
+export async function checkRioVagasHealth(job){
+  try{
+    await resolveRioApplyForm(job,{timeout:5000,attempts:1});
+    return {ok:true,error:''};
+  }catch(e){
+    if(e?.code==='RIO_CLOSED')return {ok:true,error:''};
+    return {ok:false,error:'RioVagas indisponível ou lento: '+String(e?.message||e)};
+  }
+}
+
 function resolvedPrefs(job,prefs={}){
   const advertised=String(job?.salary||'').trim();
   const usable=advertised&&!/pretens|a combinar|não informado|nao informado/i.test(advertised);
@@ -114,23 +175,26 @@ export async function applyRioVagasDirect(job,resumeFile,profile,prefs={},option
     if(e?.code==='RIO_CLOSED')return {status:'CLOSED',error:String(e.message||e)};
     return {status:'ERROR',error:String(e?.message||e)};
   }
+  if(form.schema?.unsupportedRequired?.length)return {status:'ERROR',error:'RioVagas: formulário mudou e possui campo obrigatório ainda não suportado: '+form.schema.unsupportedRequired.join(', ')};
+  if(!form.schema?.hasAttachment&&!form.schema?.hasTextResume)return {status:'ERROR',error:'RioVagas: formulário ativo não oferece meio suportado para enviar o currículo'};
+  if(!form.schema?.hasAttachment&&form.schema?.hasTextResume&&!String(profile.baseResumeText||'').trim())
+    return {status:'ERROR',error:'RioVagas: formulário exige currículo em texto e o currículo-base textual não está disponível'};
+  const preflight={schemaHash:form.schema?.signature||'',resumeMode:form.schema?.hasAttachment?'attachment':'text',questionCount:form.questions.length,providerJobId:String(form.postId||'')};
   const effectivePrefs=resolvedPrefs(job,prefs);
   const questions=form.questions.map(q=>({id:String(q.id),question:q.question,options:q.options}));
   const answers=questions.length?await aiAnswers(questions,profile,effectivePrefs,job).catch(()=>new Map()):new Map();
   const resolved=[];
   for(const q of questions){
     const answer=answers.get(String(q.id))||safeFallbackAnswer(q.question,q.options,profile,effectivePrefs,job);
-    if(!answer)return {status:'NEEDS_DATA',error:'Campos obrigatórios sem dado confirmado: '+q.question};
+    if(!answer)return {status:'NEEDS_DATA',error:'Campos obrigatórios sem dado confirmado: '+q.question,preflight};
     let value=String(answer);
     if(q.options.length){
       const exact=q.options.find(x=>norm(x)===norm(value))||q.options.find(x=>norm(x).includes(norm(value))||norm(value).includes(norm(x)));
-      if(!exact)return {status:'NEEDS_DATA',error:'Resposta segura não encontrada para: '+q.question};
+      if(!exact)return {status:'NEEDS_DATA',error:'Resposta segura não encontrada para: '+q.question,preflight};
       value=exact;
     }
     resolved.push({id:q.id,question:q.question,value});
   }
-  if(dryRun)return {status:'READY',error:''};
-
   const data=new FormData();
   data.set('ciente','on');
   data.set('ciente_email','on');
@@ -140,15 +204,31 @@ export async function applyRioVagasDirect(job,resumeFile,profile,prefs={},option
   data.set('nome_candidato',String(profile.name));
   data.set('email_candidato',String(profile.email));
   data.set('celular_candidato',String(profile.phone));
-  data.set('telefone_candidato','');
-  data.set('forma_envio','anexo');
+  data.set('telefone_candidato',String(profile.phone));
+  const deliveryOptions=form.schema?.deliveryOptions||[];
+  const attachmentMode=deliveryOptions.find(x=>/anexo|arquivo/i.test(norm(x)));
+  const textMode=deliveryOptions.find(x=>!/anexo|arquivo/i.test(norm(x)));
+  const delivery=form.schema?.hasAttachment?(attachmentMode||deliveryOptions[0]||'anexo'):(textMode||deliveryOptions[0]||'texto');
+  data.set('forma_envio',delivery);
   if(/name=['"]pretensao_salarial['"]/i.test(form.html))data.set('pretensao_salarial',String(effectivePrefs.salaryExpectation||'A combinar'));
   if(/name=['"]apresentacao_candidato['"]/i.test(form.html))data.set('apresentacao_candidato',intro(job,profile));
   for(const q of resolved){data.set('perguntas['+q.id+']',q.question);data.set('respostas['+q.id+']',q.value);}
-  const blob=new Blob([fs.readFileSync(resumeFile)],{type:'application/pdf'});
-  data.set('anexo',blob,path.basename(resumeFile));
-  data.set('curriculo_candidato','');
+  if(form.schema?.hasAttachment){
+    const blob=new Blob([fs.readFileSync(resumeFile)],{type:'application/pdf'});
+    data.set('anexo',blob,path.basename(resumeFile));
+  }
+  if(form.schema?.hasTextResume){
+    const resumeText=String(profile.baseResumeText||profile.rawText||'').trim();
+    if(!resumeText)return {status:'ERROR',error:'RioVagas: formulário exige currículo em texto, mas o currículo-base textual está vazio'};
+    data.set('curriculo_candidato',resumeText);
+  }
   data.set('form_submit','confirm');
+  const missingPayloadFields=[...new Set((form.schema?.controls||[])
+    .filter(x=>x.required&&!data.has(x.name))
+    .map(x=>x.name))];
+  if(missingPayloadFields.length)
+    return {status:'ERROR',error:'RioVagas: payload incompleto para campos obrigatórios: '+missingPayloadFields.join(', '),preflight};
+  if(dryRun)return {status:'READY',error:'',preflight};
 
   let r,body='';
   try{

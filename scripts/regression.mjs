@@ -3,9 +3,9 @@ import path from 'path';
 import { db } from '../src/db.mjs';
 import { queryRioInventory, sourceRegistry } from '../src/services/inventory.mjs';
 import { prefilterJobsForAI } from '../src/services/ranking.mjs';
-import { knownAnswer, aiAnswers } from '../src/apply/answers.mjs';
+import { knownAnswer, aiAnswers, canonicalFormQuestionKey } from '../src/apply/answers.mjs';
 import { inferProfile } from '../src/services/resume.mjs';
-import { applyRioVagasDirect } from '../src/apply/rio.mjs';
+import { applyRioVagasDirect, parseRioFormHtml } from '../src/apply/rio.mjs';
 
 function assert(condition,message){
   if(!condition)throw new Error(message);
@@ -130,6 +130,66 @@ fs.writeFileSync(contactProbe,'fake-pdf');
 const missingContact=await applyRioVagasDirect({title:'Teste',url:'https://invalid.local/never-called'},contactProbe,{name:'Teste',email:'teste@example.com',phone:''},{},{dryRun:true});
 fs.rmSync(contactProbe,{force:true});
 assert(missingContact.status==='ERROR'&&/celular ausente/i.test(missingContact.error||''),'Dry-run voltou a ignorar contato obrigatório');
+
+const inferredContactProfile=inferProfile('CRISTIANO TESTE\n33 ANOS\nRUA ALBANO, 194, CASA 3 - PRAÇA SECA\nRIO DE JANEIRO, RJ, BRASIL\n( 21) 99042 – 8876\ncristiano@example.com');
+assert(inferredContactProfile.phone==='(21) 99042-8876','Telefone com travessão/pontuação não foi normalizado');
+assert(inferredContactProfile.age==='33','Idade explícita do currículo deixou de ser extraída');
+assert(/PRAÇA SECA/i.test(inferredContactProfile.neighborhood),'Bairro no final do endereço deixou de ser extraído');
+assert(canonicalFormQuestionKey('Qual bairro você mora?')===canonicalFormQuestionKey('Lugar que reside?'),'Variações de pergunta de bairro não foram agrupadas');
+assert(canonicalFormQuestionKey('Possui fácil acesso à Zona Sul?')===canonicalFormQuestionKey('Reside próximo a Zona Sul?'),'Variações equivalentes de acesso não foram agrupadas');
+const semanticSaved={...inferredContactProfile,formAnswers:{'Possui fácil acesso à Zona Sul?':'Sim'}};
+assert(knownAnswer('Reside próximo a Zona Sul?',semanticSaved,{})==='Sim','Resposta confirmada equivalente não foi reaproveitada');
+
+const syntheticRioAttachmentForm=`
+<input name="s" required value="">
+<form method="post">
+  <input type="hidden" name="candidato_vaga_nonce_field" value="nonce123">
+  <input type="hidden" name="_wp_http_referer" value="/enviar-curriculo-gratis/?vaga=77">
+  <input type="hidden" name="post_id" value="77">
+  <input type="text" name="nome_candidato">
+  <input type="email" name="email_candidato">
+  <input type="text" name="celular_candidato">
+  <input type="radio" name="forma_envio" value="anexo">
+  <input type="file" name="anexo">
+  <input type="hidden" name="perguntas[0]" value="Possui experiência?">
+  <input type="radio" name="respostas[0]" value="Sim" required>
+  <input type="radio" name="respostas[0]" value="Não" required>
+  <input type="checkbox" name="ciente" required>
+</form>`;
+const parsedAttachment=parseRioFormHtml(syntheticRioAttachmentForm,'https://riovagas.com.br/enviar-curriculo-gratis/?vaga=77');
+assert(parsedAttachment.schema.hasAttachment===true&&parsedAttachment.schema.hasTextResume===false,'Formulário com anexo não foi reconhecido');
+assert(parsedAttachment.questions[0]?.options?.length===2,'Opções de radio do RioVagas deixaram de ser lidas');
+assert(!parsedAttachment.schema.unsupportedRequired.includes('s'),'Campo de busca externo vazou para o formulário da candidatura');
+
+const syntheticRioTextForm=`
+<form method="post">
+  <input type="hidden" name="candidato_vaga_nonce_field" value="nonce456">
+  <input type="hidden" name="post_id" value="88">
+  <input type="radio" name="forma_envio" value="texto">
+  <textarea name="curriculo_candidato"></textarea>
+  <input type="hidden" name="perguntas[2]" value="Em qual bairro você mora?">
+  <textarea name="respostas[2]" required></textarea>
+  <input type="checkbox" name="ciente" required>
+</form>`;
+const parsedText=parseRioFormHtml(syntheticRioTextForm,'https://riovagas.com.br/enviar-curriculo-gratis/?vaga=88');
+assert(parsedText.schema.hasAttachment===false&&parsedText.schema.hasTextResume===true,'Formulário de currículo em texto não foi reconhecido');
+assert(parsedText.questions[0]?.controlTypes?.includes('textarea'),'Resposta em textarea deixou de ser reconhecida');
+
+const syntheticRioUnknownRequired=`
+<form>
+  <input type="hidden" name="candidato_vaga_nonce_field" value="n">
+  <input type="hidden" name="post_id" value="99">
+  <input type="text" name="campo_novo_do_rio" required>
+  <input type="checkbox" name="ciente" required>
+</form>`;
+const parsedUnknown=parseRioFormHtml(syntheticRioUnknownRequired,'https://riovagas.com.br/enviar-curriculo-gratis/?vaga=99');
+assert(parsedUnknown.schema.unsupportedRequired.includes('campo_novo_do_rio'),'Campo obrigatório novo deixou de acionar proteção de schema');
+
+const serverRuntimeText=fs.readFileSync(path.resolve('src/server.mjs'),'utf8');
+assert(serverRuntimeText.includes('PREFLIGHTING')&&serverRuntimeText.includes('ERROR_PREFLIGHT'),'Pré-voo obrigatório saiu do pipeline real');
+assert(serverRuntimeText.includes('CIRCUIT_BREAKER')&&serverRuntimeText.includes('ERROR_DISPATCH_PAUSED'),'Circuit breaker do envio real saiu do pipeline');
+assert(serverRuntimeText.includes('checkRioVagasHealth')&&serverRuntimeText.includes('ERROR_SOURCE_UNAVAILABLE'),'Proteção contra indisponibilidade do RioVagas saiu do pipeline');
+
 console.log(JSON.stringify({
   ok:true,
   source:enabled[0].name,

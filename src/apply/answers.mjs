@@ -18,12 +18,74 @@ function ageFromBirth(value){
   if(now.getMonth()<birth.getMonth()||(now.getMonth()===birth.getMonth()&&now.getDate()<birth.getDate())) age--;
   return age>=14&&age<100?String(age):null;
 }
+function inferredAge(profile){
+  const explicit=String(profile?.age||'').match(/\b(\d{2})\b/)?.[1]||'';
+  if(explicit&&Number(explicit)>=14&&Number(explicit)<100)return explicit;
+  const fromBirth=ageFromBirth(profile?.birthDate);if(fromBirth)return fromBirth;
+  const raw=String(profile?.rawText||'');
+  const m=raw.match(/\b(?:idade\s*[:\-]?\s*)?(\d{2})\s*anos?\b/i);
+  return m&&Number(m[1])>=14&&Number(m[1])<100?m[1]:null;
+}
+function compactQuestion(value){
+  return norm(value).replace(/[^a-z0-9]+/g,' ').trim();
+}
+function accessDestination(question){
+  let q=compactQuestion(question);
+  q=q.replace(/\b(voce|vcs|possui|tem|mora|reside|facil|acesso|proximo|proxima|perto|ao|a|do|da|de|bairro|local|trabalho|empresa|vaga|regiao|na|no|para|ate)\b/g,' ').replace(/\s+/g,' ').trim();
+  return q.slice(0,90);
+}
+export function canonicalFormQuestionKey(question){
+  const q=compactQuestion(question);
+  if(!q)return '';
+  if(/(?:telefone|celular|whatsapp).*(?:endereco|logradouro)|(?:endereco|logradouro).*(?:telefone|celular|whatsapp)/.test(q))return 'contact_address';
+  if(/bairro.*idade|idade.*bairro/.test(q))return 'neighborhood_age';
+  if(/data.*nascimento|nascimento/.test(q))return 'birth_date';
+  if(/\bidade\b/.test(q))return 'age';
+  if(/(?:qual|em qual|que|onde|lugar).*bairro|bairro.*(?:mora|reside|residencia)|(?:mora|reside).*bairro|lugar que reside/.test(q))return 'neighborhood';
+  if(/endereco|logradouro/.test(q))return 'address';
+  if(/telefone|celular|whatsapp/.test(q))return 'phone';
+  if(/\bcpf\b/.test(q))return 'cpf';
+  if(/\bcep\b|codigo postal/.test(q))return 'cep';
+  if(/cnh|habilitacao/.test(q))return 'cnh';
+  if(/numero.*roupa.*calcado|uniforme.*calcado|roupa.*sapato|tamanho.*calcado/.test(q))return 'uniform_shoe_size';
+  if(/rio card|riocard|\bjae\b|bilhete unico/.test(q))return 'transit_card';
+  if(/meio.*transporte|qual.*transporte/.test(q))return 'transport_mode';
+  if(/valor.*passagem|passagem.*valor|quantas?.*passag/.test(q))return 'transport_cost:'+accessDestination(q);
+  if(/curso.*(?:turno|periodo|previsao)|(?:turno|periodo|previsao).*(?:curso|conclusao|formatura)/.test(q))return 'education_details';
+  if(/medicacao|remedio/.test(q))return 'medication';
+  if(/animais|caes|gatos/.test(q))return 'animals';
+  if(/facil acesso|proxim|perto|distancia|desloc|trajeto|tempo.*(?:chegar|local|trabalho|empresa)/.test(q))return 'access:'+accessDestination(q);
+  if(/horario|turno/.test(q)&&/\d{1,2}h/.test(q))return 'shift:'+q.replace(/\s+/g,' ').slice(0,110);
+  return q;
+}
+function savedFormAnswer(question,profile){
+  const saved=profile?.formAnswers&&typeof profile.formAnswers==='object'?profile.formAnswers:{};
+  const key=canonicalFormQuestionKey(question);
+  for(const [savedQuestion,savedAnswer] of Object.entries(saved)){
+    if((compactQuestion(savedQuestion)===compactQuestion(question)||canonicalFormQuestionKey(savedQuestion)===key)
+      &&savedAnswer!==undefined&&savedAnswer!==null&&String(savedAnswer).trim())return String(savedAnswer).trim();
+  }
+  return null;
+}
+
 function inferredNeighborhood(profile){
   if(String(profile?.neighborhood||'').trim())return String(profile.neighborhood).trim();
+  const address=String(profile?.address||'').trim();
+  const addressParts=address.split(/\s+[\-–—]\s+/).map(x=>x.trim()).filter(Boolean);
+  for(let i=addressParts.length-1;i>0;i--){
+    const part=addressParts[i];
+    if(part&&!/^(?:rio de janeiro|rj|brasil|brazil)$/i.test(part))return part;
+  }
   const raw=String(profile?.rawText||'');
-  return raw.match(/(?:RJ\s*[-–—]\s*Rio de Janeiro\s*[-–—]\s*)([^\n,;|]{2,60})/i)?.[1]?.trim()
-    ||raw.match(/(?:bairro\s*[:\-]\s*)([^\n,;|]{2,60})/i)?.[1]?.trim()
-    ||'';
+  const explicit=raw.match(/(?:bairro\s*[:\-]\s*)([^\n,;|]{2,60})/i)?.[1]?.trim();
+  if(explicit)return explicit;
+  const addressLine=raw.split(/\r?\n/).find(x=>/^(?:rua|avenida|av\.?|estrada|travessa|alameda|rodovia|pra[cç]a)\b/i.test(x));
+  const parts=String(addressLine||'').split(/\s+[\-–—]\s+/).map(x=>x.trim()).filter(Boolean);
+  for(let i=parts.length-1;i>0;i--){
+    const part=parts[i];
+    if(part&&!/^(?:rio de janeiro|rj|brasil|brazil)$/i.test(part))return part;
+  }
+  return '';
 }
 function residenceText(profile,prefs={}){
   const neighborhood=inferredNeighborhood(profile);
@@ -81,21 +143,26 @@ function languageMeets(profile,language,requested){
 }
 export function knownAnswer(label,profile,prefs,job=null){
   const q=norm(label),raw=String(profile.rawText||''),neighborhood=inferredNeighborhood(profile);
-  const saved=profile?.formAnswers&&typeof profile.formAnswers==='object'?profile.formAnswers:{};
-  for(const [savedQuestion,savedAnswer] of Object.entries(saved)){
-    if(norm(savedQuestion)===q&&savedAnswer!==undefined&&savedAnswer!==null&&String(savedAnswer).trim())return String(savedAnswer).trim();
-  }
+  const savedAnswer=savedFormAnswer(label,profile);
+  if(savedAnswer)return savedAnswer;
   if(/nome/.test(q)) return profile.name||null;
   if(/e-?mail/.test(q)) return profile.email||null;
+  if(/(?:telefone|celular|whatsapp).*(?:endere[cç]o|logradouro)|(?:endere[cç]o|logradouro).*(?:telefone|celular|whatsapp)/.test(q)){
+    if(profile.phone&&profile.address)return String(profile.phone)+' | '+String(profile.address);
+    return null;
+  }
+  if(/bairro.*\bidade\b|\bidade\b.*bairro/.test(q)){
+    const age=inferredAge(profile);if(neighborhood&&age)return neighborhood+' | '+age+' anos';return null;
+  }
   if(/telefone|celular|whatsapp/.test(q)) return profile.phone||null;
   if(/\bcpf\b/.test(q)) return profile.cpf||null;
   if(/data.*nascimento|nascimento/.test(q)) return profile.birthDate||null;
-  if(/\bidade\b/.test(q)) return ageFromBirth(profile.birthDate);
+  if(/\bidade\b/.test(q)) return inferredAge(profile);
   if(/\bcep\b/.test(q)) return profile.cep||null;
   if(/(?:tempo|demora|desloc|minut)/.test(q)&&/(?:bairro|resid|mora)/.test(q)) return null;
   if(/(?:em qual|qual).*cidade.*bairro|(?:em qual|qual).*bairro.*cidade/.test(q)){const v=residenceText(profile,prefs);if(v)return v;}
-  if(/onde.*(?:mora|reside)|qual.*local.*residencia|local.*residencia/.test(q)){const v=residenceText(profile,prefs);if(v)return v;}
-  if(/(?:em que|qual).*bairro|bairro.*resid|bairro.*mora/.test(q)&&neighborhood) return neighborhood;
+  if(/onde.*(?:mora|reside)|qual.*local.*residencia|local.*residencia|lugar.*reside/.test(q)){const v=residenceText(profile,prefs);if(v)return v;}
+  if(/(?:em que|em qual|qual|que).*bairro|bairro.*resid|bairro.*mora|mora.*bairro|reside.*bairro/.test(q)&&neighborhood) return neighborhood;
   if(/reside em bairros|voce reside em|mora em (?:algum|um) dos/.test(q)&&neighborhood) return q.includes(norm(neighborhood))?'Sim':'Não';
   if(/bairro/.test(q)&&neighborhood) return neighborhood;
   if(/endere[cç]o|logradouro/.test(q)&&profile.address) return profile.address;

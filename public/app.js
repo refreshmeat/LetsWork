@@ -346,13 +346,13 @@ function updateRunSummary(counts={},total=0,runStatus=''){
     progress.classList.toggle('hidden',!total);
     $('runProgressPct').textContent=`${pct}%`;
     $('runProgressBar').style.width=`${pct}%`;
-    const active=['APPLYING','RETRYING','PREPARING'].includes(String(runStatus||'').toUpperCase());
-    $('runProgressLabel').textContent=active?'Processando lote':'Resumo do lote';
+    const active=['APPLYING','RETRYING','PREFLIGHTING','CANARY','PREPARING'].includes(String(runStatus||'').toUpperCase());
+    $('runProgressLabel').textContent=String(runStatus||'').toUpperCase()==='PREFLIGHTING'?'Pré-validando formulários':String(runStatus||'').toUpperCase()==='CANARY'?'Validando primeiro envio':active?'Processando lote':'Resumo do lote';
     progress.classList.toggle('active',active);
   }
   $('uncertainWarning')?.classList.toggle('hidden',uncertain===0);
   if($('retryBtn')){
-    const running=['APPLYING','RETRYING'].includes(String(runStatus||'').toUpperCase());
+    const running=['APPLYING','RETRYING','PREFLIGHTING','CANARY'].includes(String(runStatus||'').toUpperCase());
     $('retryBtn').disabled=running||(needs+errors===0);
     $('retryBtn').title=uncertain
       ? 'Retenta somente erros e pendências com dados. Envios sem confirmação não são repetidos.'
@@ -616,7 +616,8 @@ async function pollStatus(){
   const r=await fetch(`/api/run/${runId}/status`); if(!r.ok) return;
   const d=await r.json(),c=d.counts||{};
   currentRunMode=d.mode==='live'?'live':'dry';
-  $('statStatus').textContent=d.status||'Processando';
+  const statusLabel={PREFLIGHTING:'Pré-validando formulários',CANARY:'Validando primeiro envio',APPLYING:'Enviando candidaturas',RETRYING:'Retentando candidaturas',ERROR_PREFLIGHT:'Pré-voo bloqueou o envio',ERROR_DISPATCH_PAUSED:'Envio pausado por segurança',DONE:'Concluído'}[String(d.status||'').toUpperCase()]||d.status||'Processando';
+  $('statStatus').textContent=statusLabel;
   const terminal=(c.SENT||0)+(c.ALREADY_APPLIED||0)+(c.READY||0)+(c.ERROR||0)+(c.NEEDS_DATA||0)+(c.UNCERTAIN||0)+(c.CLOSED||0)+(c.SKIPPED_INCOMPATIBLE||0);
   notice('applyStatus',`Processadas: ${terminal}/${d.total||0} · Enviadas: ${c.SENT||0} · Validadas: ${c.READY||0} · Precisam de dado: ${c.NEEDS_DATA||0} · Erros: ${c.ERROR||0} · Sem confirmação: ${c.UNCERTAIN||0} · Encerradas: ${c.CLOSED||0}`);
   updateRunSummary(c,Number(d.total||0),d.status);
@@ -648,7 +649,7 @@ async function startRun(endpoint){
     if(!window.confirm(msg))return;
     confirmLive=retryLive;
   }
-  $('applyBtn').disabled=true;$('retryBtn').disabled=true;$('statStatus').textContent='Processando';
+  $('applyBtn').disabled=true;$('retryBtn').disabled=true;$('statStatus').textContent=currentRunMode==='live'?'Pré-validando formulários':'Simulando formulários';
   const r=await fetch(`/api/run/${runId}/${endpoint}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirmLive,selectedJobIds:endpoint==='apply'?[...selectedJobIds]:undefined})}),d=await r.json();
   if(!r.ok){notice('applyStatus',`Erro: ${d.error||'falha'}`);$('applyBtn').disabled=false;$('retryBtn').disabled=false;return;}
   notice('applyStatus',endpoint==='retry'?'Retentativa iniciada.':'Processamento iniciado.');

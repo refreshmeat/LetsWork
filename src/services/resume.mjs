@@ -162,21 +162,37 @@ export function inferProfile(text){
   const emailCandidate=clean.match(/[A-Z0-9._%+-]+\s*@\s*[A-Z0-9.-]+\s*\.\s*[A-Z]{2,}/i)?.[0]||'';
   const email=emailCandidate.replace(/\s+/g,'');
   const phone=(()=>{
-    for(const line of lines.slice(0,40)){
-      let digits=String(line||'').replace(/\D/g,'');
-      if((digits.length===12||digits.length===13)&&digits.startsWith('55'))digits=digits.slice(2);
-      if(digits.length===10||digits.length===11){
-        const ddd=digits.slice(0,2),local=digits.slice(2);
-        if(Number(ddd)>=11&&Number(ddd)<=99&&local.length>=8){
-          return `(${ddd}) ${local.length===9?local.slice(0,5):local.slice(0,4)}-${local.slice(-4)}`;
+    const format=digits=>{
+      let d=String(digits||'');
+      if((d.length===12||d.length===13)&&d.startsWith('55'))d=d.slice(2);
+      if(d.length!==10&&d.length!==11)return '';
+      const ddd=d.slice(0,2),local=d.slice(2);
+      if(Number(ddd)<11||Number(ddd)>99)return '';
+      return `(${ddd}) ${local.length===9?local.slice(0,5):local.slice(0,4)}-${local.slice(-4)}`;
+    };
+    const head=lines.slice(0,50);
+    const candidates=[
+      ...head.filter(x=>/telefone|tel\.?|celular|whatsapp|contato/i.test(x)),
+      ...head.filter(x=>!/(?:cpf|cnpj|cep|rg\b|nascimento|data de nascimento)/i.test(x))
+    ];
+    for(const line of candidates){
+      const groups=String(line||'').match(/\d+/g)||[];
+      let digits='';
+      if(groups.length>=3){
+        for(let i=0;i<=groups.length-3;i++){
+          const a=groups[i],b=groups[i+1],c=groups[i+2];
+          if(a.length===2&&(b.length===4||b.length===5)&&c.length===4){digits=a+b+c;break;}
+          if(a==='55'&&groups[i+1]?.length===2&&(groups[i+2]?.length===4||groups[i+2]?.length===5)&&groups[i+3]?.length===4){
+            digits=a+groups[i+1]+groups[i+2]+groups[i+3];break;
+          }
         }
       }
-    }
-    const loose=clean.match(/(?:\+?55\D{0,4})?\(?\s*\d{2}\s*\)?\D{0,6}9?\d{4}\D{0,6}\d{4}/)?.[0]||'';
-    const digits=loose.replace(/\D/g,'').replace(/^55(?=\d{10,11}$)/,'');
-    if(digits.length===10||digits.length===11){
-      const ddd=digits.slice(0,2),local=digits.slice(2);
-      return `(${ddd}) ${local.length===9?local.slice(0,5):local.slice(0,4)}-${local.slice(-4)}`;
+      if(!digits&&/telefone|tel\.?|celular|whatsapp|contato/i.test(line)){
+        const rawDigits=String(line).replace(/\D/g,'');
+        if([10,11,12,13].includes(rawDigits.length))digits=rawDigits;
+      }
+      const formatted=format(digits);
+      if(formatted)return formatted;
     }
     return '';
   })();
@@ -209,9 +225,22 @@ export function inferProfile(text){
   const cpf=(labeled(/^(?:cpf)\b/i)||clean.match(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/)?.[0]||'').trim();
   const cep=(labeled(/^(?:cep)\b/i)||clean.match(/\b\d{5}-?\d{3}\b/)?.[0]||'').trim();
   const birthDate=(labeled(/^(?:data de nascimento|nascimento)\b/i).match(/\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{4}\b/)?.[0]||'').trim();
+  const age=(()=>{
+    const head=lines.slice(0,12).join(' ');
+    const m=head.match(/\b(?:idade\s*[:\-]?\s*)?(\d{2})\s*anos?\b/i);
+    const n=Number(m?.[1]||0);
+    return n>=14&&n<100?String(n):'';
+  })();
   let address=labeled(/^(?:endereço|endereco|logradouro)\b/i);
   if(!address)address=lines.find(x=>/^(?:rua|avenida|av\.?|estrada|travessa|alameda|rodovia|praça|praca)\b/i.test(x))||'';
   let neighborhood=labeled(/^(?:bairro)\b/i),residenceCity='',residenceState='';
+  if(!neighborhood&&address){
+    const parts=address.split(/\s+[\-–—]\s+/).map(x=>x.trim()).filter(Boolean);
+    for(let i=parts.length-1;i>0;i--){
+      const part=parts[i];
+      if(part&&!/^(?:rio de janeiro|rj|brasil|brazil)$/i.test(part)){neighborhood=part;break;}
+    }
+  }
   const states='AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO';
   for(const line of lines){
     let m=line.match(new RegExp('^('+states+')\\s*[-–—]\\s*([^–—-]+?)(?:\\s*[-–—]\\s*(.+))?$','iu'));
@@ -222,5 +251,5 @@ export function inferProfile(text){
     if(m&&!/@|https?:|www\./i.test(line)){residenceCity=m[1].trim();residenceState=m[2].toUpperCase();break;}
   }
   return {name:guessName(raw),email,phone,linkedin,portfolio,instagram,skills,rawText:raw,
-    cpf,birthDate,cep,address,neighborhood,residenceCity,residenceState,additionalFacts:''};
+    cpf,birthDate,age,cep,address,neighborhood,residenceCity,residenceState,additionalFacts:''};
 }

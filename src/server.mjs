@@ -14,7 +14,8 @@ import { classifyJobsForQueue } from './services/sendability.mjs';
 import { optimizeBaseResume } from './services/tailor.mjs';
 import { terminalInventoryIds, upsertCandidateMatch, updateCandidateMatchStatus, recordRunEvent, runMetrics, sourceRegistry } from './services/inventory.mjs';
 import { createPortableBackup, preparePortableRestore } from './services/backup.mjs';
-import { applyRioVagasDirect } from './apply/rio.mjs';
+import { applyRioVagasDirect, checkRioVagasHealth } from './apply/rio.mjs';
+import { canonicalFormQuestionKey } from './apply/answers.mjs';
 import { runtime } from './runtime.mjs';
 import { storage, ensureCandidateDirs, candidateDir } from './storage.mjs';
 import { registerMultiFileRoute } from './multifile.mjs';
@@ -59,14 +60,14 @@ function hydratedResumeProfile(resume,candidateId,supportDocuments=[]){
   const recovered=sourceText?inferProfile(sourceText):{};
   const candidate=db.prepare('SELECT name FROM candidates WHERE id=?').get(Number(candidateId))||{};
   const merged={...current};
-  for(const key of ['name','email','phone','address','neighborhood','residenceCity','residenceState','birthDate','cpf','cep']){
+  for(const key of ['name','email','phone','address','neighborhood','residenceCity','residenceState','birthDate','age','cpf','cep']){
     if(!String(merged[key]||'').trim()&&String(recovered?.[key]||'').trim())merged[key]=recovered[key];
   }
   if(!String(merged.name||'').trim()&&String(candidate.name||'').trim())merged.name=candidate.name;
   if(resume?.id){
     const persisted=parseJson(resume.profile_json,{});
     let changed=false;
-    for(const key of ['name','email','phone','address','neighborhood','residenceCity','residenceState','birthDate','cpf','cep']){
+    for(const key of ['name','email','phone','address','neighborhood','residenceCity','residenceState','birthDate','age','cpf','cep']){
       if(String(merged[key]||'')!==String(persisted[key]||'')){persisted[key]=merged[key]||'';changed=true;}
     }
     if(changed)db.prepare('UPDATE resumes SET profile_json=? WHERE id=?').run(json(persisted),resume.id);
@@ -100,26 +101,34 @@ function rebuildResumeFromDocuments(candidateId){
 === DOCUMENTO DE APOIO: ${x.original_name} ===
 ${x.extracted_text||''}`)].join('');
   const inferred=inferProfile(combined),old=parseJson(latest?.profile_json,{}),sticky={};
-  for(const k of ['name','email','phone','linkedin','portfolio','instagram','pcd','cpf','birthDate','cep','address','neighborhood','additionalFacts']) if(old[k]!==undefined&&old[k]!==null&&old[k]!=='') sticky[k]=old[k];
+  for(const k of ['name','email','phone','linkedin','portfolio','instagram','pcd','cpf','birthDate','age','cep','address','neighborhood','residenceCity','residenceState','additionalFacts','formAnswers']) if(old[k]!==undefined&&old[k]!==null&&old[k]!=='') sticky[k]=old[k];
   const profile={...inferred,...sticky,candidateId,rawText:combined};
   if(latest){ if(latest.base_resume_path)try{fs.rmSync(latest.base_resume_path,{force:true});}catch{}; db.prepare('UPDATE resumes SET original_name=?,stored_path=?,extracted_text=?,profile_json=?,base_resume_path=NULL,base_resume_text=NULL,base_resume_focus=NULL,base_resume_updated_at=NULL WHERE id=?').run(primary.original_name,primary.stored_path,combined,json(profile),latest.id); }
   else db.prepare('INSERT INTO resumes(candidate_id,original_name,stored_path,extracted_text,profile_json) VALUES(?,?,?,?,?)').run(candidateId,primary.original_name,primary.stored_path,combined,json(profile));
   return profile;
 }
 const normJobKey=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
-function pendingFieldForQuestion(question){
-  const q=normJobKey(question);
-  if(/\bcpf\b/.test(q))return 'cpf';
-  if(/\bcep\b|codigo postal/.test(q))return 'cep';
-  if(/nascimento|data de nascimento/.test(q))return 'birthDate';
-  if(/endereco|logradouro/.test(q))return 'address';
-  if(/bairro|onde mora|onde reside|reside em|mora em|residencia|facil acesso|proximo|perto|distancia|desloc|trajeto|locomoc|como.*(?:chegaria|chegar)|tempo.*(?:empresa|trabalho|local)|onibus|brt|metro/.test(q))return 'neighborhood';
-  if(/linkedin/.test(q))return 'linkedin';
-  if(/instagram/.test(q))return 'instagram';
-  if(/portfolio|portifolio/.test(q))return 'portfolio';
-  return '';
+function pendingFieldsForQuestion(question){
+  const q=normJobKey(question),key=canonicalFormQuestionKey(question);
+  if(key==='contact_address')return ['phone','address'];
+  if(key==='neighborhood_age')return ['neighborhood','age'];
+  if(key==='cpf')return ['cpf'];
+  if(key==='cep')return ['cep'];
+  if(key==='birth_date')return ['birthDate'];
+  if(key==='age')return ['age'];
+  if(key==='address')return ['address'];
+  if(key==='phone')return ['phone'];
+  if(key==='neighborhood')return ['neighborhood'];
+  if(/linkedin/.test(q))return ['linkedin'];
+  if(/instagram/.test(q))return ['instagram'];
+  if(/portfolio|portifolio/.test(q))return ['portfolio'];
+  return [];
 }
-const pendingFieldLabels={cpf:'CPF',cep:'CEP',birthDate:'Data de nascimento',address:'Endereço',neighborhood:'Bairro de residência',linkedin:'LinkedIn',instagram:'Instagram',portfolio:'Portfólio'};
+const pendingFieldLabels={
+  cpf:'CPF',cep:'CEP',birthDate:'Data de nascimento',age:'Idade',
+  address:'Endereço',phone:'Telefone / WhatsApp',neighborhood:'Bairro de residência',
+  residenceCity:'Cidade',residenceState:'Estado',linkedin:'LinkedIn',instagram:'Instagram',portfolio:'Portfólio'
+};
 function canonicalUrl(value){
   try{const u=new URL(value);u.hash='';for(const k of [...u.searchParams.keys()])if(/^utm_|^(ref|source|src|fbclid|gclid)$/i.test(k))u.searchParams.delete(k);return u.toString().replace(/\/$/,'');}
   catch{return String(value||'').trim().replace(/\/$/,'');}
@@ -251,7 +260,8 @@ app.get('/api/candidate/:id/pending-data',(req,res)=>{
   const resume=db.prepare('SELECT * FROM resumes WHERE candidate_id=? ORDER BY id DESC LIMIT 1').get(id);
   const run=latestRun(id);
   if(!resume||!run)return res.json({runId:run?.id||null,total:0,requiredFields:[],custom:[],readyToRetry:0});
-  const profile=parseJson(resume.profile_json,{});
+  const supportDocuments=db.prepare('SELECT kind,original_name,stored_path FROM documents WHERE candidate_id=? AND is_primary=0').all(id);
+  const profile=hydratedResumeProfile(resume,id,supportDocuments);
   const saved=profile.formAnswers&&typeof profile.formAnswers==='object'?profile.formAnswers:{};
   const rows=db.prepare(`SELECT a.job_id,a.error,j.title
     FROM applications a JOIN jobs j ON j.id=a.job_id
@@ -262,7 +272,7 @@ app.get('/api/candidate/:id/pending-data',(req,res)=>{
     const raw=String(row.error||'').replace(/^.*?Campos obrigat[^:]*:\s*/i,'').trim();
     for(const part of raw.split(/\s*\|\s*/)){
       const question=String(part||'').trim(); if(!question)continue;
-      const key=normJobKey(question); if(!key)continue;
+      const key=canonicalFormQuestionKey(question)||normJobKey(question); if(!key)continue;
       if(!unique.has(key))unique.set(key,{question,jobs:[]});
       unique.get(key).jobs.push({jobId:row.job_id,title:row.title});
     }
@@ -271,15 +281,20 @@ app.get('/api/candidate/:id/pending-data',(req,res)=>{
   for(const item of unique.values()){
     const qnorm=normJobKey(item.question);
     if(/(?:linkedin|instagram|portfolio|portifolio)/.test(qnorm)&&/(?:se tiver|se houver|opcional)/.test(qnorm))continue;
-    const field=pendingFieldForQuestion(item.question);
-    if(field){
-      if(!String(profile[field]??'').trim()){
+    const fields=pendingFieldsForQuestion(item.question);
+    if(fields.length){
+      let missing=false;
+      for(const field of fields){
+        if(String(profile[field]??'').trim())continue;
+        missing=true;
         if(!fieldMap.has(field))fieldMap.set(field,{field,label:pendingFieldLabels[field]||field,questions:[],jobs:[]});
         const rec=fieldMap.get(field);rec.questions.push(item.question);rec.jobs.push(...item.jobs);
       }
+      if(missing)continue;
+      // All factual fields are present; the answer resolver will fill this automatically.
       continue;
     }
-    const savedKey=Object.keys(saved).find(k=>normJobKey(k)===normJobKey(item.question));
+    const semanticKey=canonicalFormQuestionKey(item.question); const savedKey=Object.keys(saved).find(k=>normJobKey(k)===normJobKey(item.question)||canonicalFormQuestionKey(k)===semanticKey);
     custom.push({question:item.question,answer:savedKey?String(saved[savedKey]??''):'',jobs:item.jobs});
   }
   const unresolvedCustom=custom.filter(x=>!String(x.answer||'').trim());
@@ -301,7 +316,7 @@ app.patch('/api/candidate/:id/pending-data',(req,res)=>{
     if(q&&v)nextAnswers[q]=v;
   }
   const fields=req.body?.fields&&typeof req.body.fields==='object'?req.body.fields:{};
-  const allowed=new Set(['cpf','cep','birthDate','address','neighborhood','linkedin','instagram','portfolio']);
+  const allowed=new Set(['cpf','cep','birthDate','age','address','phone','neighborhood','residenceCity','residenceState','linkedin','instagram','portfolio']);
   for(const [key,value] of Object.entries(fields))if(allowed.has(key))profile[key]=String(value??'').trim();
   profile.formAnswers=nextAnswers;
   db.prepare('UPDATE resumes SET profile_json=? WHERE id=?').run(json(profile),resume.id);
@@ -323,7 +338,7 @@ async function reviewPendingJobsForRun({runId,pending,profile,filters,batchSize,
     upsertCandidateMatch({candidateId,inventoryId:Number(j.inventoryId||row.inventory_id||0),runId,score:j.score||row.score||0,decision:ok?'AI_APPROVED':reason,reason,rankPosition:row.rank_position||0,batchNo:0});
   }
 
-  while(['APPLYING','RETRYING'].includes(String(getRun(runId)?.status||''))){
+  while(['APPLYING','RETRYING','PREFLIGHTING','CANARY'].includes(String(getRun(runId)?.status||''))){
     await new Promise(resolve=>setTimeout(resolve,750));
   }
   db.prepare('UPDATE jobs SET selected=0,batch_no=0 WHERE run_id=?').run(runId);
@@ -480,15 +495,37 @@ app.post('/api/search', async (req,res) => {
 });
 
 app.get('/api/run/:id/jobs',(req,res)=>res.json(getBatchJobs(Number(req.params.id))));
-async function processRun(runId,onlyErrors=false){
-  const run=getRun(runId);if(!run)throw new Error('Execução não encontrada');
-  const resume=getResume(run.resume_id);
+function executionPrerequisites(run){
+  const resume=getResume(run?.resume_id);
+  const errors=[];
+  if(!resume)return {resume:null,profile:{},applicationResume:'',errors:['currículo principal não encontrado']};
   const supportDocuments=db.prepare('SELECT kind,original_name,stored_path FROM documents WHERE candidate_id=? AND is_primary=0').all(run.candidate_id);
   const profile=hydratedResumeProfile(resume,run.candidate_id,supportDocuments);
+  profile.baseResumeText=String(resume.base_resume_text||'').trim();
+  const applicationResume=(resume.base_resume_path&&fs.existsSync(resume.base_resume_path))?resume.base_resume_path:'';
+  if(!applicationResume)errors.push('currículo-base ainda não foi gerado');
+  const name=String(profile.name||'').trim(),email=String(profile.email||'').trim(),phoneDigits=String(profile.phone||'').replace(/\D/g,'');
+  if(name.length<3||/^sem nome$/i.test(name))errors.push('nome ausente ou inválido');
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))errors.push('e-mail ausente ou inválido');
+  if(![10,11,12,13].includes(phoneDigits.length))errors.push('celular ausente ou inválido');
+  if(applicationResume){
+    try{
+      const bytes=fs.statSync(applicationResume).size;
+      if(bytes<500)errors.push('currículo PDF vazio ou inválido');
+      if(bytes>2*1024*1024)errors.push('currículo excede 2 MB');
+      const head=fs.readFileSync(applicationResume,{encoding:null}).subarray(0,5).toString('ascii');
+      if(head!=='%PDF-')errors.push('arquivo de currículo não é um PDF válido');
+    }catch{errors.push('currículo-base não pôde ser lido');}
+  }
+  return {resume,profile,applicationResume,errors:[...new Set(errors)]};
+}
+
+async function processRun(runId,onlyErrors=false){
+  const run=getRun(runId);if(!run)throw new Error('Execução não encontrada');
+  const prereq=executionPrerequisites(run);
+  const {resume,profile,applicationResume}=prereq;
   const prefs={...parseJson(run.filters_json,{}),candidateId:run.candidate_id};
   const dryRun=!prefs.autoSubmit;
-  const applicationResume=(resume.base_resume_path&&fs.existsSync(resume.base_resume_path))?resume.base_resume_path:'';
-  if(!applicationResume)throw new Error('Currículo-base ainda não foi gerado. Gere o currículo otimizado antes de iniciar os envios.');
 
   let jobs=getJobs(runId).filter(job=>/^RioVagas$/i.test(String(job?.source||''))&&/riovagas\.com\.br\/riovagas\//i.test(String(job?.url||'')));
   if(onlyErrors){
@@ -503,9 +540,6 @@ async function processRun(runId,onlyErrors=false){
     }
     jobs=eligible;
   }
-
-  db.prepare('UPDATE runs SET status=? WHERE id=?').run(onlyErrors?'RETRYING':'APPLYING',runId);
-  recordRunEvent({runId,candidateId:run.candidate_id,type:onlyErrors?'RETRY_START':'APPLY_START',data:{jobs:jobs.length,dryRun}});
 
   const saveApplication=(job,status,error='')=>{
     const row=db.prepare(`INSERT INTO applications(run_id,job_id,status,tailored_file,error,submitted_at)
@@ -545,34 +579,156 @@ async function processRun(runId,onlyErrors=false){
         status=CASE WHEN candidate_job_history.status IN ('SENT','ALREADY_APPLIED') THEN candidate_job_history.status ELSE excluded.status END`)
       .run(run.candidate_id,job.source_key,providerJobId,job.source||'',job.url||'',job.title||'',job.company||'',job.location||'',job.published_at||'',status,runId);
   };
+  const markResult=(job,result,eventType='PREFLIGHT_RESULT')=>{
+    const applicationId=saveApplication(job,result.status,result.error||'');
+    saveReceipt(applicationId,job,result.receipt);
+    if(result.status==='CLOSED')db.prepare("UPDATE jobs SET sendable=0,blocked_reason='CLOSED',selected=0,batch_no=0 WHERE id=?").run(job.id);
+    updateHistory(job,result.status);
+    updateCandidateMatchStatus(run.candidate_id,job.inventory_id,result.status,result.error||'',runId);
+    recordRunEvent({runId,candidateId:run.candidate_id,type:eventType,data:{jobId:job.id,inventoryId:job.inventory_id,status:result.status,error:String(result.error||'').slice(0,240),receiptType:result.receipt?.confirmationType||'',preflight:result.preflight||null}});
+    return applicationId;
+  };
 
+  if(jobs.length){
+    const health=await checkRioVagasHealth(jobs[0]);
+    if(!health.ok){
+      db.prepare('UPDATE runs SET status=? WHERE id=?').run('ERROR_SOURCE_UNAVAILABLE',runId);
+      recordRunEvent({runId,candidateId:run.candidate_id,type:'SOURCE_UNAVAILABLE',data:{error:health.error}});
+      return;
+    }
+  }
+
+  const globalErrors=prereq.errors;
+  if(globalErrors.length){
+    const message='Pré-voo bloqueado: '+globalErrors.join('; ');
+    for(const job of jobs)markResult(job,{status:'ERROR',error:message});
+    db.prepare('UPDATE runs SET status=? WHERE id=?').run('ERROR_PREFLIGHT',runId);
+    recordRunEvent({runId,candidateId:run.candidate_id,type:'PREFLIGHT_BLOCKED',data:{jobs:jobs.length,error:message}});
+    return;
+  }
+
+  db.prepare('UPDATE runs SET status=? WHERE id=?').run('PREFLIGHTING',runId);
+  recordRunEvent({runId,candidateId:run.candidate_id,type:'PREFLIGHT_START',data:{jobs:jobs.length,dryRun}});
   let cursor=0;
   const workerCount=Math.max(2,Math.min(8,Number(process.env.RIO_APPLY_WORKERS||4)));
-  async function worker(){
+  async function preflightWorker(){
     while(true){
       const index=cursor++;if(index>=jobs.length)return;
       const job=jobs[index];
       const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
       if(['SENT','ALREADY_APPLIED','UNCERTAIN','CLOSED'].includes(old?.status))continue;
       try{
-        saveApplication(job,'PREPARING','');
-        const result=await applyRioVagasDirect(job,applicationResume,profile,prefs,{dryRun});
-        const applicationId=saveApplication(job,result.status,result.error||'');
-        saveReceipt(applicationId,job,result.receipt);
-        if(result.status==='CLOSED')db.prepare("UPDATE jobs SET sendable=0,blocked_reason='CLOSED',selected=0,batch_no=0 WHERE id=?").run(job.id);
-        updateHistory(job,result.status);
-        updateCandidateMatchStatus(run.candidate_id,job.inventory_id,result.status,result.error||'',runId);
-        recordRunEvent({runId,candidateId:run.candidate_id,type:'APPLICATION_RESULT',data:{jobId:job.id,inventoryId:job.inventory_id,status:result.status,error:String(result.error||'').slice(0,240),receiptType:result.receipt?.confirmationType||''}});
+        saveApplication(job,'PREPARING','Pré-validando formulário');
+        const result=await applyRioVagasDirect(job,applicationResume,profile,prefs,{dryRun:true});
+        markResult(job,result,'PREFLIGHT_RESULT');
       }catch(e){
         const message=String(e?.message||e).slice(0,500);
-        saveApplication(job,'ERROR',message);
-        updateHistory(job,'ERROR');
-        updateCandidateMatchStatus(run.candidate_id,job.inventory_id,'ERROR',message,runId);
-        recordRunEvent({runId,candidateId:run.candidate_id,type:'APPLICATION_ERROR',data:{jobId:job.id,inventoryId:job.inventory_id,error:message}});
+        markResult(job,{status:'ERROR',error:message},'PREFLIGHT_ERROR');
       }
     }
   }
-  await Promise.all(Array.from({length:Math.min(workerCount,Math.max(1,jobs.length))},()=>worker()));
+  await Promise.all(Array.from({length:Math.min(workerCount,Math.max(1,jobs.length))},()=>preflightWorker()));
+
+  const jobIds=jobs.map(x=>Number(x.id));
+  const placeholders=jobIds.length?jobIds.map(()=>'?').join(','):'0';
+  const preflightRows=jobIds.length?db.prepare(`SELECT job_id,status,error FROM applications WHERE run_id=? AND job_id IN (${placeholders})`).all(runId,...jobIds):[];
+  const technicalErrors=preflightRows.filter(x=>x.status==='ERROR');
+  const readyIds=new Set(preflightRows.filter(x=>x.status==='READY').map(x=>Number(x.job_id)));
+  recordRunEvent({runId,candidateId:run.candidate_id,type:'PREFLIGHT_COMPLETE',data:{
+    total:preflightRows.length,
+    ready:preflightRows.filter(x=>x.status==='READY').length,
+    needsData:preflightRows.filter(x=>x.status==='NEEDS_DATA').length,
+    closed:preflightRows.filter(x=>x.status==='CLOSED').length,
+    errors:technicalErrors.length
+  }});
+
+  if(dryRun){
+    db.prepare('UPDATE runs SET status=? WHERE id=?').run('DONE',runId);
+    recordRunEvent({runId,candidateId:run.candidate_id,type:'APPLY_COMPLETE',data:runMetrics(runId)});
+    return;
+  }
+  if(technicalErrors.length){
+    db.prepare('UPDATE runs SET status=? WHERE id=?').run('ERROR_PREFLIGHT',runId);
+    recordRunEvent({runId,candidateId:run.candidate_id,type:'PREFLIGHT_BLOCKED',data:{errors:technicalErrors.length,samples:technicalErrors.slice(0,5).map(x=>String(x.error||'').slice(0,180))}});
+    return;
+  }
+
+  const readyJobs=jobs.filter(x=>readyIds.has(Number(x.id)));
+  if(!readyJobs.length){
+    db.prepare('UPDATE runs SET status=? WHERE id=?').run('DONE',runId);
+    recordRunEvent({runId,candidateId:run.candidate_id,type:'APPLY_COMPLETE',data:runMetrics(runId)});
+    return;
+  }
+
+  // Live canary: prove one real POST end-to-end before opening concurrent dispatch.
+  db.prepare('UPDATE runs SET status=? WHERE id=?').run('CANARY',runId);
+  recordRunEvent({runId,candidateId:run.candidate_id,type:'CANARY_START',data:{jobs:readyJobs.length}});
+  let canarySucceeded=false,canaryIndex=-1;
+  for(let i=0;i<readyJobs.length;i++){
+    const job=readyJobs[i];
+    try{
+      saveApplication(job,'PREPARING','Pré-voo aprovado; executando envio-canário');
+      const result=await applyRioVagasDirect(job,applicationResume,profile,prefs,{dryRun:false});
+      markResult(job,result,'CANARY_RESULT');
+      if(['SENT','ALREADY_APPLIED'].includes(result.status)){
+        canarySucceeded=true;canaryIndex=i;
+        recordRunEvent({runId,candidateId:run.candidate_id,type:'CANARY_OK',data:{jobId:job.id,status:result.status}});
+        break;
+      }
+      if(['CLOSED','NEEDS_DATA'].includes(result.status))continue;
+      db.prepare('UPDATE runs SET status=? WHERE id=?').run('ERROR_DISPATCH_PAUSED',runId);
+      recordRunEvent({runId,candidateId:run.candidate_id,type:'CIRCUIT_BREAKER',data:{phase:'canary',jobId:job.id,status:result.status,reason:String(result.error||result.status).slice(0,400)}});
+      return;
+    }catch(e){
+      const message=String(e?.message||e).slice(0,500);
+      markResult(job,{status:'ERROR',error:message},'CANARY_ERROR');
+      db.prepare('UPDATE runs SET status=? WHERE id=?').run('ERROR_DISPATCH_PAUSED',runId);
+      recordRunEvent({runId,candidateId:run.candidate_id,type:'CIRCUIT_BREAKER',data:{phase:'canary',jobId:job.id,reason:message}});
+      return;
+    }
+  }
+  if(!canarySucceeded){
+    db.prepare('UPDATE runs SET status=? WHERE id=?').run('DONE',runId);
+    recordRunEvent({runId,candidateId:run.candidate_id,type:'APPLY_COMPLETE',data:runMetrics(runId)});
+    return;
+  }
+
+  const dispatchJobs=readyJobs.filter(job=>String(db.prepare('SELECT status FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id)?.status||'')==='READY');
+  db.prepare('UPDATE runs SET status=? WHERE id=?').run(onlyErrors?'RETRYING':'APPLYING',runId);
+  recordRunEvent({runId,candidateId:run.candidate_id,type:onlyErrors?'RETRY_START':'APPLY_START',data:{jobs:dispatchJobs.length,dryRun:false,preflightReady:true,canary:true}});
+
+  cursor=0;
+  let abortDispatch=false,abortReason='';
+  async function sendWorker(){
+    while(true){
+      if(abortDispatch)return;
+      const index=cursor++;if(index>=dispatchJobs.length)return;
+      const job=dispatchJobs[index];
+      const old=db.prepare('SELECT * FROM applications WHERE run_id=? AND job_id=?').get(runId,job.id);
+      if(['SENT','ALREADY_APPLIED','UNCERTAIN','CLOSED'].includes(old?.status))continue;
+      try{
+        saveApplication(job,'PREPARING','Pré-voo aprovado; enviando');
+        const result=await applyRioVagasDirect(job,applicationResume,profile,prefs,{dryRun:false});
+        markResult(job,result,'APPLICATION_RESULT');
+        if(['ERROR','UNCERTAIN'].includes(result.status)){
+          abortDispatch=true;
+          abortReason=String(result.error||result.status).slice(0,400);
+        }
+      }catch(e){
+        const message=String(e?.message||e).slice(0,500);
+        markResult(job,{status:'ERROR',error:message},'APPLICATION_ERROR');
+        abortDispatch=true;abortReason=message;
+      }
+    }
+  }
+  await Promise.all(Array.from({length:Math.min(workerCount,Math.max(1,dispatchJobs.length))},()=>sendWorker()));
+
+  if(abortDispatch){
+    db.prepare("UPDATE applications SET status='READY',error='Envio pausado pelo circuit breaker após erro inesperado em outra vaga.' WHERE run_id=? AND status='PREPARING'").run(runId);
+    db.prepare('UPDATE runs SET status=? WHERE id=?').run('ERROR_DISPATCH_PAUSED',runId);
+    recordRunEvent({runId,candidateId:run.candidate_id,type:'CIRCUIT_BREAKER',data:{reason:abortReason,metrics:runMetrics(runId)}});
+    return;
+  }
   db.prepare('UPDATE runs SET status=? WHERE id=?').run('DONE',runId);
   recordRunEvent({runId,candidateId:run.candidate_id,type:'APPLY_COMPLETE',data:runMetrics(runId)});
 }
@@ -612,7 +768,7 @@ function persistRunSelection(runId,selectedJobIds){
 app.post('/api/run/:id/selection',(req,res)=>{
   const id=Number(req.params.id),run=getRun(id);
   if(!run)return res.status(404).json({error:'Execução não encontrada'});
-  if(['APPLYING','RETRYING'].includes(run.status))return res.status(409).json({error:'Aguarde o processamento atual terminar antes de alterar a seleção.'});
+  if(['APPLYING','RETRYING','PREFLIGHTING','CANARY'].includes(run.status))return res.status(409).json({error:'Aguarde o processamento atual terminar antes de alterar a seleção.'});
   const saved=persistRunSelection(id,req.body?.selectedJobIds);
   res.json({ok:true,runId:id,...saved});
 });
@@ -620,9 +776,11 @@ app.post('/api/run/:id/selection',(req,res)=>{
 app.post('/api/run/:id/apply',(req,res)=>{
   const id=Number(req.params.id),run=getRun(id);
   if(!run)return res.status(404).json({error:'Execução não encontrada'});
-  if(['APPLYING','RETRYING'].includes(run.status))return res.status(409).json({error:'Já existe processamento em andamento.'});
+  if(['APPLYING','RETRYING','PREFLIGHTING','CANARY'].includes(run.status))return res.status(409).json({error:'Já existe processamento em andamento.'});
   const prefs=parseJson(run.filters_json,{});
   if(prefs.autoSubmit&&req.body?.confirmLive!==true)return res.status(409).json({error:'Confirmação explícita do modo real é obrigatória.'});
+  const prereq=executionPrerequisites(run);
+  if(prereq.errors.length)return res.status(422).json({error:'Pré-voo do candidato bloqueado: '+prereq.errors.join('; '),missing:prereq.errors});
   const saved=persistRunSelection(id,req.body?.selectedJobIds);
   if(saved.selected<1)return res.status(400).json({error:'Selecione pelo menos uma vaga para processar.'});
   startBackground(id,false);
@@ -633,12 +791,14 @@ app.post('/api/run/:id/retry',(req,res)=>{
   const id=Number(req.params.id),run=getRun(id); if(!run) return res.status(404).json({error:'Execução não encontrada'});
   const prefs=parseJson(run.filters_json,{});
   if(prefs.autoSubmit&&req.body?.confirmLive!==true)return res.status(409).json({error:'Confirmação explícita do modo real é obrigatória para a retentativa.'});
+  const prereq=executionPrerequisites(run);
+  if(prereq.errors.length)return res.status(422).json({error:'Pré-voo do candidato bloqueado: '+prereq.errors.join('; '),missing:prereq.errors});
   startBackground(id,true); res.json({ok:true,runId:id});
 });
 app.post('/api/run/:id/batch/:batch',(req,res)=>{
   const id=Number(req.params.id),batch=Number(req.params.batch),run=getRun(id);
   if(!run) return res.status(404).json({error:'Execução não encontrada'});
-  if(['APPLYING','RETRYING'].includes(run.status)) return res.status(409).json({error:'Aguarde o processamento atual terminar antes de trocar o lote.'});
+  if(['APPLYING','RETRYING','PREFLIGHTING','CANARY'].includes(run.status)) return res.status(409).json({error:'Aguarde o processamento atual terminar antes de trocar o lote.'});
   const maxBatch=Number(db.prepare('SELECT COALESCE(MAX(batch_no),0) n FROM jobs WHERE run_id=? AND sendable=1').get(id).n||0);
   if(!Number.isInteger(batch)||batch<1||batch>maxBatch) return res.status(400).json({error:'Lote inválido'});
   db.prepare('UPDATE jobs SET selected=CASE WHEN sendable=1 AND batch_no=? THEN 1 ELSE 0 END WHERE run_id=?').run(batch,id);
@@ -711,7 +871,7 @@ app.get('/api/candidate/:id/export-latest.xlsx',async(req,res)=>{
 app.delete('/api/candidate/:id/search-history',(req,res)=>{
   const id=Number(req.params.id),candidate=getCandidate(id);
   if(!candidate)return res.status(404).json({error:'Candidato não encontrado'});
-  const active=db.prepare("SELECT COUNT(*) n FROM runs WHERE candidate_id=? AND status IN ('APPLYING','RETRYING','PREPARING')").get(id).n||0;
+  const active=db.prepare("SELECT COUNT(*) n FROM runs WHERE candidate_id=? AND status IN ('APPLYING','RETRYING','PREFLIGHTING','CANARY','PREPARING')").get(id).n||0;
   if(active)return res.status(409).json({error:'Há uma execução em andamento. Aguarde terminar antes de excluir o histórico.'});
   try{
     const runs=db.prepare('SELECT id FROM runs WHERE candidate_id=?').all(id).map(x=>Number(x.id));
