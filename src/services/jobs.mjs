@@ -625,14 +625,15 @@ function decodeHtml(value){
     .replace(/\s+/g,' ').trim();
 }
 async function searchRioVagasRecent(terms,filters,max=8000,{pageLimit=0}={}){
-  const out=new Map();
+  const out=new Map(),seenIds=new Set();
   const cutoff=new Date(Date.now()-Math.max(1,Math.min(60,Number(filters.recencyDays||15)))*86400000).toISOString();
+  const snapshotBefore=new Date().toISOString();
   const base='https://riovagas.com.br/wp-json/wp/v2/posts';
   const headers={'user-agent':'Mozilla/5.0','accept-language':'pt-BR,pt;q=0.9'};
   const fetchPage=async page=>{
     const qs=new URLSearchParams({
       categories:'1',per_page:'100',page:String(page),orderby:'id',order:'desc',
-      after:cutoff,_fields:'id,date,link,title,excerpt,content'
+      after:cutoff,before:snapshotBefore,_fields:'id,date,link,title,excerpt,content'
     });
     let lastError=null;
     for(let attempt=0;attempt<3;attempt++){
@@ -654,6 +655,7 @@ async function searchRioVagasRecent(terms,filters,max=8000,{pageLimit=0}={}){
   };
   const addRows=rows=>{
     for(const row of rows||[]){
+      if(row?.id!==undefined&&row?.id!==null)seenIds.add(String(row.id));
       if(!String(row.link||'').includes('/riovagas/'))continue;
       const title=decodeHtml(row.title?.rendered||''),description=decodeHtml(row.content?.rendered||row.excerpt?.rendered||'');
       if(!title||!row.link)continue;
@@ -680,10 +682,16 @@ async function searchRioVagasRecent(terms,filters,max=8000,{pageLimit=0}={}){
   }
   if(workers)await Promise.all(Array.from({length:workers},()=>worker()));
   if(failed.length)console.log('[RioVagas] paginas com falha:',failed.slice(0,8));
-  console.log(`[RioVagas] feed completo da janela: ${out.size} vagas em ${lastPage} pagina(s) de ${totalPages}`);
+  const expectedTotal=Math.max(0,Number(first.total||0));
+  const syncOk=first.status===200&&!first.error&&failed.length===0;
+  const exactSnapshot=lastPage===totalPages&&(expectedTotal===0||seenIds.size===expectedTotal);
+  console.log(`[RioVagas] snapshot ${snapshotBefore}: ${out.size} vagas diretas; ${seenIds.size}/${expectedTotal||seenIds.size} posts lidos em ${lastPage}/${totalPages} pagina(s)`);
   const result=[...out.values()].slice(0,max);
-  Object.defineProperty(result,'_syncOk',{value:first.status===200&&!first.error&&failed.length===0,enumerable:false});
-  Object.defineProperty(result,'_syncComplete',{value:first.status===200&&!first.error&&failed.length===0&&lastPage===totalPages,enumerable:false});
+  Object.defineProperty(result,'_syncOk',{value:syncOk,enumerable:false});
+  Object.defineProperty(result,'_syncComplete',{value:syncOk&&exactSnapshot,enumerable:false});
+  Object.defineProperty(result,'_expectedTotal',{value:expectedTotal,enumerable:false});
+  Object.defineProperty(result,'_seenTotal',{value:seenIds.size,enumerable:false});
+  Object.defineProperty(result,'_snapshotBefore',{value:snapshotBefore,enumerable:false});
   return result;
 }
 
@@ -693,7 +701,7 @@ function rioInventoryCutoff(days=RIO_INVENTORY_DAYS){
   return new Date(Date.now()-safe*86400000).toISOString();
 }
 function pruneRioInventory(){
-  db.prepare("DELETE FROM job_inventory WHERE source='RioVagas' AND datetime(published_at)<datetime(?)").run(rioInventoryCutoff());
+  db.prepare("UPDATE job_inventory SET active=0 WHERE source='RioVagas' AND active=1 AND datetime(published_at)<datetime(?)").run(rioInventoryCutoff());
 }
 function rioInventoryRows(days=15,max=25000,terms=[]){
   return queryRioInventory(days,terms,max);
@@ -735,12 +743,12 @@ function saveRioInventory(rows,{fullSnapshot=false}={}){
       const contentHash=createHash('sha1').update([j.title||'',j.description||'',j.publishedAt||''].join('\n')).digest('hex');
       upsert.run(j.externalId||'',j.url||'',canonical,j.title||'',j.company||'',j.salary||'',j.location||'',j.description||'',j.contractType||'',j.publishedAt||'',contentHash);
     }
-    if(fullSnapshot)db.prepare("DELETE FROM job_inventory WHERE source='RioVagas' AND active=0").run();
+    // Mantém registros inativos para preservar histórico/referências de execuções antigas.
     db.exec('COMMIT');
   }catch(e){try{db.exec('ROLLBACK');}catch{}throw e;}
 }
 let rioInventorySyncPromise=null;
-async function refreshRioInventory(max=25000,{incremental=true}={}){
+async function refreshRioInventory(max=25000,{incremental=true,recordState=true}={}){
   const inventoryFilters={recencyDays:RIO_INVENTORY_DAYS};
   const rows=await searchRioVagasRecent([],inventoryFilters,max,{pageLimit:incremental?10:0}).catch(e=>{
     console.log('[RioVagas] sincronizacao falhou:',String(e?.message||e));return [];
@@ -748,9 +756,10 @@ async function refreshRioInventory(max=25000,{incremental=true}={}){
   const fullSnapshot=!incremental&&rows._syncComplete===true;
   if(rows.length)saveRioInventory(rows,{fullSnapshot});
   pruneRioInventory();
-  if(rows._syncOk)saveRioSyncState({full:fullSnapshot,count:rows.length});
+  if(recordState&&rows._syncOk)saveRioSyncState({full:fullSnapshot,count:rows.length});
   const active=Number(db.prepare("SELECT COUNT(*) AS n FROM job_inventory WHERE source='RioVagas' AND active=1").get()?.n||0);
-  return {fetched:rows.length,active,fullSnapshot,ok:rows._syncOk===true,complete:rows._syncComplete===true};
+  return {fetched:rows.length,active,fullSnapshot,ok:rows._syncOk===true,complete:rows._syncComplete===true,
+    expectedTotal:Number(rows._expectedTotal||0),seenTotal:Number(rows._seenTotal||0),snapshotBefore:String(rows._snapshotBefore||'')};
 }
 function rioFullSyncDue(maxAgeMs=24*60*60*1000){
   const ms=Date.parse(String(rioInventoryState().last_full_sync_at||''));
@@ -778,7 +787,12 @@ export async function syncRioVagasInventory({full=false,force=false}={}){
   }
   rioInventorySyncPromise=(async()=>{
     const result=await refreshRioInventory(full?25000:1000,{incremental:!full});
-    return {...result,...getRioVagasInventoryStatus(),skipped:false};
+    let tailFetched=0;
+    if(full&&result.fullSnapshot){
+      const tail=await refreshRioInventory(1000,{incremental:true,recordState:false});
+      tailFetched=Number(tail.fetched||0);
+    }
+    return {...result,...getRioVagasInventoryStatus(),tailFetched,skipped:false};
   })();
   try{return await rioInventorySyncPromise;}finally{rioInventorySyncPromise=null;}
 }

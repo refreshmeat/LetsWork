@@ -213,6 +213,16 @@ assert(serverRuntimeText.includes('PREFLIGHTING')&&serverRuntimeText.includes('E
 assert(serverRuntimeText.includes('CIRCUIT_BREAKER')&&serverRuntimeText.includes('ERROR_DISPATCH_PAUSED'),'Circuit breaker do envio real saiu do pipeline');
 assert(serverRuntimeText.includes('checkRioVagasHealth')&&serverRuntimeText.includes('ERROR_SOURCE_UNAVAILABLE'),'Proteção contra indisponibilidade do RioVagas saiu do pipeline');
 
+
+const jobsRuntimeText=fs.readFileSync(path.resolve('src/services/jobs.mjs'),'utf8');
+assert(jobsRuntimeText.includes('before:snapshotBefore'),'Reconciliação RioVagas deixou de congelar o snapshot temporal');
+assert(jobsRuntimeText.includes('seenIds.size===expectedTotal'),'Reconciliação completa deixou de validar todos os IDs esperados');
+assert(jobsRuntimeText.includes("fullSnapshot=!incremental&&rows._syncComplete===true"),'Limpeza destrutiva voltou a aceitar snapshot incompleto');
+const serverStartupText=fs.readFileSync(path.resolve('src/server.mjs'),'utf8');
+assert(serverStartupText.includes("syncRioVagasInventory({full:true,force:true})"),'Abertura do LetsWork deixou de forçar reconciliação completa');
+assert(serverStartupText.includes('await startRioStartupSync()'),'Busca voltou a poder começar antes da sincronização inicial');
+assert(serverStartupText.includes('setInterval(runRioInventoryMaintenance,60*60*1000)'),'Manutenção periódica do inventário deixou de existir');
+
 console.log(JSON.stringify({
   ok:true,
   source:enabled[0].name,

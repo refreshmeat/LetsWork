@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import ExcelJS from 'exceljs';
 import { db, json, parseJson, candidateSummary } from './db.mjs';
 import { extractText, inferProfile, extractPreferredResumeFromZip } from './services/resume.mjs';
-import { searchJobs, buildSearchTerms, dedupeJobs, maintainRioVagasInventory, getRioVagasInventoryStatus } from './services/jobs.mjs';
+import { searchJobs, buildSearchTerms, dedupeJobs, maintainRioVagasInventory, syncRioVagasInventory, getRioVagasInventoryStatus } from './services/jobs.mjs';
 import { prefilterJobsForAI, reviewVerifiedJobsWithAI, jobNeedsAIReview } from './services/ranking.mjs';
 import { classifyJobsForQueue } from './services/sendability.mjs';
 import { optimizeBaseResume } from './services/tailor.mjs';
@@ -26,6 +26,23 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const PORT = Number(process.env.PORT || 4317);
 const uploadDir = runtime.uploads;
 const reportDir = runtime.reports;
+let rioStartupSyncPromise=null;
+let rioStartupSyncing=false;
+function startRioStartupSync(){
+  if(rioStartupSyncPromise)return rioStartupSyncPromise;
+  rioStartupSyncing=true;
+  rioStartupSyncPromise=syncRioVagasInventory({full:true,force:true})
+    .then(status=>{
+      console.log(`[RioVagas] sincronizacao de abertura: ${status.active||0} ativas; ${status.fetched||0} no snapshot; ${status.tailFetched||0} recentes apos o snapshot`);
+      return status;
+    })
+    .catch(e=>{
+      console.log('[RioVagas] sincronizacao de abertura falhou:',String(e?.message||e));
+      return {ok:false,error:String(e?.message||e)};
+    })
+    .finally(()=>{rioStartupSyncing=false;});
+  return rioStartupSyncPromise;
+}
 const generatedDir = runtime.generated;
 const upload = multer({ dest:uploadDir, limits:{fileSize:80*1024*1024} });
 const docKind=(name,isPrimary=false)=>{
@@ -363,6 +380,7 @@ app.post('/api/search', async (req,res) => {
   if(searchInFlight) return res.status(409).json({error:'Uma busca já está em andamento. Aguarde a conclusão para iniciar outra.'});
   searchInFlight=true;
   try {
+    await startRioStartupSync();
     const {resumeId,filters={},preview=false} = req.body || {};
     let resume = getResume(Number(resumeId));
     if (!resume) return res.status(400).json({error:'Currículo não encontrado'});
@@ -955,7 +973,7 @@ app.post('/api/backup/import',upload.single('backup'),(req,res)=>{
 app.get('/api/system/status',(req,res)=>{
   try{
     const dbFile=path.join(storage.data,'letswork.sqlite');
-    res.json({inventory:getRioVagasInventoryStatus(),sources:sourceRegistry(),database:{path:dbFile,bytes:fs.existsSync(dbFile)?fs.statSync(dbFile).size:0}});
+    res.json({inventory:{...getRioVagasInventoryStatus(),startupSyncing:rioStartupSyncing},sources:sourceRegistry(),database:{path:dbFile,bytes:fs.existsSync(dbFile)?fs.statSync(dbFile).size:0}});
   }catch(e){res.status(500).json({error:String(e?.message||e)});}
 });
 
@@ -986,7 +1004,7 @@ app.get('/api/inventory/riovagas/status',(req,res)=>{
 app.listen(PORT,'127.0.0.1',()=>{
   console.log(`LetsWork: http://127.0.0.1:${PORT}`);
   console.log(`PASTA DESTA EXECUÇÃO: ${runtime.session}`);
-  const startup=setTimeout(runRioInventoryMaintenance,1200); startup.unref?.();
+  setImmediate(()=>{startRioStartupSync();});
   const timer=setInterval(runRioInventoryMaintenance,60*60*1000); timer.unref?.();
 });
 
