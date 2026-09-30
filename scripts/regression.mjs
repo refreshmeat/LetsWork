@@ -3,6 +3,7 @@ import path from 'path';
 import { db } from '../src/db.mjs';
 import { queryRioInventory, sourceRegistry } from '../src/services/inventory.mjs';
 import { prefilterJobsForAI } from '../src/services/ranking.mjs';
+import { rioLocation } from '../src/services/jobs.mjs';
 import { knownAnswer, aiAnswers, canonicalFormQuestionKey, accessDestination } from '../src/apply/answers.mjs';
 import { inferProfile } from '../src/services/resume.mjs';
 import { applyRioVagasDirect, parseRioFormHtml, invalidQuestionShape } from '../src/apply/rio.mjs';
@@ -24,6 +25,7 @@ assert(inventoryCount>0,'Inventário RioVagas está vazio');
 assert(scalar("SELECT COUNT(*) n FROM job_inventory WHERE active=1 AND source<>'RioVagas'")===0,'Há fonte ativa diferente de RioVagas no inventário');
 assert(scalar("SELECT COUNT(*) n FROM job_inventory WHERE source='RioVagas' AND active=1 AND url NOT LIKE '%riovagas.com.br/riovagas/%'")===0,'Inventário ativo contém URL que não é vaga direta RioVagas');
 assert(scalar("SELECT COUNT(*) n FROM job_inventory WHERE source='RioVagas' AND active=1 AND datetime(published_at)<datetime('now','-30 days')")===0,'Há vaga ativa com mais de 30 dias');
+assert(scalar("SELECT COUNT(*) n FROM job_inventory WHERE source='RioVagas' AND active=1 AND (lower(location) LIKE '%benef%' OR lower(location) LIKE '%vale-transporte%' OR lower(location) LIKE '%horario%')")===0,'Local ativo ainda contém Benefícios/Vale-transporte/Horário');
 assert(scalar("SELECT COUNT(*) n FROM (SELECT url,COUNT(*) c FROM job_inventory WHERE source='RioVagas' GROUP BY url HAVING c>1)")===0,'Há URL duplicada no inventário');
 
 const counts={};
@@ -83,6 +85,31 @@ const receiptJobMismatch=scalar(`
   WHERE x.inventory_id IS NOT NULL AND j.inventory_id IS NOT NULL AND x.inventory_id<>j.inventory_id
 `);
 assert(receiptJobMismatch===0,'Há recibo ligado à vaga errada');
+const sentWithoutReceipt=scalar(`
+  SELECT COUNT(*) n
+  FROM applications a
+  LEFT JOIN application_receipts x ON x.application_id=a.id
+  WHERE a.status='SENT' AND x.id IS NULL
+`);
+assert(sentWithoutReceipt===0,'Há SENT sem recibo persistido');
+const sentWithoutSuccessProof=scalar(`
+  SELECT COUNT(*) n
+  FROM applications a
+  LEFT JOIN application_receipts x ON x.application_id=a.id AND x.confirmation_type='SUCCESS_TEXT'
+  WHERE a.status='SENT' AND x.id IS NULL
+`);
+assert(sentWithoutSuccessProof===0,'Há SENT sem confirmação positiva SUCCESS_TEXT');
+const staleUncertainVisual=scalar(`
+  SELECT COUNT(*) n
+  FROM jobs j
+  JOIN runs r ON r.id=j.run_id
+  JOIN candidate_job_history h
+    ON h.candidate_id=r.candidate_id
+   AND h.fingerprint=j.source_key
+  WHERE h.status='UNCERTAIN'
+    AND j.blocked_reason='ALREADY_SENT'
+`);
+assert(staleUncertainVisual===0,'Histórico UNCERTAIN ainda aparece como ALREADY_SENT');
 
 assert(!fs.existsSync(path.resolve('src/apply/engine.mjs')),'Motor legado de navegador voltou ao projeto');
 assert(!fs.existsSync(path.resolve('src/sources')),'Pasta de fontes legadas voltou ao projeto');
@@ -94,6 +121,22 @@ for(const file of ['src/server.mjs','src/services/jobs.mjs','src/apply/rio.mjs']
   assert(!/from\s+['"]playwright-core['"]/.test(text),'Playwright voltou ao runtime ativo: '+file);
   assert(!/from\s+['"]\.\/sources\//.test(text),'Fonte legada voltou ao runtime ativo: '+file);
 }
+
+
+const locationProbe='Forma de Trabalho: Presencial Bairro: Barra da Tijuca Cidade: Rio de Janeiro Benefícios: Vale-transporte Vale-refeição Horário de Expediente: 09:00 às 18:00';
+assert(rioLocation('Auxiliar de Escritório – Empresa – Barra da Tijuca',locationProbe)==='Barra da Tijuca - Rio de Janeiro','Local do RioVagas engoliu Benefícios ou Horário');
+const indexText=fs.readFileSync(path.resolve('public/index.html'),'utf8');
+const appText=fs.readFileSync(path.resolve('public/app.js'),'utf8');
+assert(indexText.includes('class="contract-option"')&&indexText.includes('Tipo de vaga'),'Filtro de tipo de vaga deixou de exibir checkboxes claros');
+assert(!indexText.includes('<div class="chip-group">'),'Filtro de contrato voltou ao formato ambíguo de chips');
+assert(appText.includes('function displayJobLocation(job)'),'Proteção visual de localização foi removida');
+assert(appText.includes('if(!searchFilters.contractTypes.length)'),'Busca voltou a aceitar zero tipos de vaga selecionados');
+assert(appText.includes('function resetCandidateRunUi()'),'Troca de candidato deixou de limpar o estado visual imediatamente');
+assert(appText.includes('const searchSelectionSeq=candidateSelectionSeq'),'Busca assíncrona deixou de capturar o candidato ativo');
+assert(appText.includes("selectionSeq!==candidateSelectionSeq||Number(candidateId)!==targetCandidate||Number(runId)!==targetRun"),'Polling pode voltar a pintar dados de outro candidato');
+const loadRunGuard=appText.indexOf("Number(status.candidateId)!==expectedId");
+const loadRunAssign=appText.indexOf("runId=requestedRunId",loadRunGuard);
+assert(loadRunGuard>=0&&loadRunAssign>loadRunGuard,'loadRun voltou a assumir o run antes de validar o candidato');
 
 const syntheticDesignFilters={
   nationwide:false,state:'RJ',city:'Rio de Janeiro',cities:['Rio de Janeiro'],states:['RJ'],locationScope:'state_priority',

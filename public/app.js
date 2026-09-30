@@ -254,13 +254,31 @@ async function savePendingData(){
 }
 
 
+function resetCandidateRunUi(){
+  runId=null;
+  currentJobs=[];
+  currentStatuses=new Map();
+  selectedJobIds.clear();
+  manuallyDeselectedJobIds.clear();
+  $('resultsCard')?.classList.add('hidden');
+  if($('jobsBody'))$('jobsBody').innerHTML='';
+  if($('resultMeta'))$('resultMeta').textContent='';
+  if($('selectionMeta'))$('selectionMeta').textContent='';
+  if($('batchSelect')){$('batchSelect').classList.add('hidden');$('batchSelect').innerHTML='';}
+  if($('runSummary')){$('runSummary').classList.add('hidden');$('runSummary').innerHTML='';}
+  if($('runProgress'))$('runProgress').classList.add('hidden');
+  if($('statJobs'))$('statJobs').textContent='0';
+  if($('statStatus'))$('statStatus').textContent='Carregando';
+  notice('searchStatus','');
+  notice('applyStatus','');
+}
+
 async function selectCandidate(id,options={}){
   const selectionSeq=++candidateSelectionSeq;
   const requestedCandidateId=Number(id);
   if(searchReviewTimer){clearInterval(searchReviewTimer);searchReviewTimer=null;}
   if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
-  runId=null; currentJobs=[]; currentStatuses=new Map(); selectedJobIds.clear(); manuallyDeselectedJobIds.clear();
-  $('resultsCard')?.classList.add('hidden');
+  resetCandidateRunUi();
   // Cada candidato começa com busca ampla por padrão; filtros restritivos de outro candidato não vazam para este perfil.
   $('locationScope').value='state_priority';
   $('experienceLevel').value='entry';
@@ -282,8 +300,8 @@ async function refreshCandidateStats(detail=currentCandidate,selectionSeq=candid
   if(selectionSeq!==candidateSelectionSeq||Number(expectedCandidateId)!==Number(candidateId))return;
   const summary=candidates.find(c=>c.id===expectedCandidateId)||{};
   $('statSent').textContent=summary.sent||0; $('statRuns').textContent=summary.runs||detail?.runs?.length||0;
-  runId=summary.latestRunId||detail?.runs?.[0]?.id||null;
-  if(runId) await loadRun(runId,expectedCandidateId,selectionSeq);
+  const latestRunId=summary.latestRunId||detail?.runs?.[0]?.id||null;
+  if(latestRunId) await loadRun(latestRunId,expectedCandidateId,selectionSeq);
   else{
     currentJobs=[]; $('statJobs').textContent='0'; $('statStatus').textContent='Pronto';
     $('resultsCard').classList.add('hidden');
@@ -325,6 +343,7 @@ function effectiveJobStatus(job,application={}){
   const status=String(application?.status||'').toUpperCase();
   if(status)return status;
   const blocked=String(job?.blocked_reason||job?.reason||'').toUpperCase();
+  if(blocked==='ALREADY_UNCERTAIN')return 'UNCERTAIN';
   if(blocked==='CLOSED')return 'CLOSED';
   if(blocked==='SKIPPED_INCOMPATIBLE')return 'SKIPPED_INCOMPATIBLE';
   return 'PENDING';
@@ -428,6 +447,24 @@ function bindJobSelection(){
     scheduleJobSelectionSave();
   }));
 }
+function displayJobLocation(job){
+  const description=String(job?.description||'').replace(/\s+/g,' ').trim();
+  const field=label=>{
+    if(!description)return '';
+    const next='Bairro|Cidade|Benefícios|Beneficios|Horário(?: de Expediente)?|Horario(?: de Expediente)?|Salário|Salario|Bolsa Auxílio|Bolsa Auxilio|Informações(?: Adicionais)?|Informacoes(?: Adicionais)?|Forma de Trabalho|Regime de Contratação|Regime de Contratacao|Número de Vagas|Numero de Vagas';
+    const rx=new RegExp('\\b'+label+'\\s*:\\s*(.+?)(?=\\s+(?:'+next+')\\s*:|$)','i');
+    return String(description.match(rx)?.[1]||'').replace(/[.;,:\-–—\s]+$/g,'').trim();
+  };
+  const neighborhood=field('Bairro'),city=field('Cidade');
+  if(neighborhood&&city&&neighborhood.toLowerCase()!==city.toLowerCase())return neighborhood+' - '+city;
+  if(neighborhood||city)return neighborhood||city;
+  let raw=String(job?.location||'').replace(/\s+/g,' ').trim();
+  raw=raw.split(/\s+(?:Benefícios|Beneficios|Horário(?: de Expediente)?|Horario(?: de Expediente)?|Salário|Salario|Informações|Informacoes)\s*:/i)[0].trim();
+  raw=raw.replace(/\s+Cidade\s*:\s*/i,' - ').replace(/[.;,:\-–—\s]+$/g,'').trim();
+  if(/^(?:vale[- ]?transporte|beneficios?|horario|a combinar|sem experiencia)$/i.test(raw))return '';
+  return raw;
+}
+
 function renderJobs(jobs,statuses=currentStatuses){
   currentStatuses=statuses instanceof Map?statuses:new Map();
   const filter=$('jobStatusFilter')?.value||'all';
@@ -452,7 +489,7 @@ function renderJobs(jobs,statuses=currentStatuses){
     const badge=statusBadge(status,application.error||j.blocked_reason||'');
     return `<tr class="${rowClass}"><td class="select-col">${selectCell}</td>
       <td><strong>${esc(j.title)}</strong><span class="sub">${esc(j.company||j.source||'')}${sent?' · candidatura registrada':''}</span></td>
-      <td>${esc(j.location||'')}</td><td>${esc(j.salary||'')}</td>
+      <td>${esc(displayJobLocation(j)||'Não informado')}</td><td>${esc(j.salary||'')}</td>
       <td><span class="score-badge">${pct}%</span></td><td>${badge}</td>
       <td><a class="link-out" href="${esc(j.url)}" target="_blank" rel="noreferrer">Abrir</a></td></tr>`;
   }).join(''):`<tr><td colspan="7"><div class="empty-list">Nenhuma vaga neste filtro.</div></td></tr>`;
@@ -470,16 +507,13 @@ function renderBatchControl(status={}){
 async function loadRun(id,expectedCandidateId=candidateId,selectionSeq=candidateSelectionSeq){
   const requestedRunId=Number(id);
   const expectedId=Number(expectedCandidateId);
-  runId=requestedRunId;
   const [jr,ar,sr]=await Promise.all([fetch(`/api/run/${id}/jobs`),fetch(`/api/run/${id}/applications`),fetch(`/api/run/${id}/status`)]);
   const jobsPayload=jr.ok?await jr.json():[];
   const apps=ar.ok?await ar.json():[];
   const status=sr.ok?await sr.json():{};
   currentRunMode=status.mode==='live'?'live':'dry';
-  if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==expectedId||Number(status.candidateId)!==expectedId){
-    if(runId===requestedRunId)runId=null;
-    return;
-  }
+  if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==expectedId||Number(status.candidateId)!==expectedId)return;
+  runId=requestedRunId;
   currentJobs=jobsPayload;
   selectedJobIds=new Set(currentJobs.filter(j=>Number(j.selected)!==0).map(j=>Number(j.id)));
   manuallyDeselectedJobIds=new Set(currentJobs.filter(j=>isJobSelectable(j)&&Number(j.selected)===0).map(j=>Number(j.id)));
@@ -596,14 +630,25 @@ function startSearchReviewPoll(targetRun){
 
 $('searchBtn').addEventListener('click',async()=>{
   if(!resumeId) return;
+  const searchSelectionSeq=candidateSelectionSeq;
+  const searchCandidateId=Number(candidateId);
+  const searchResumeId=Number(resumeId);
+  const searchFilters=filters();
+  if(!searchFilters.contractTypes.length){
+    notice('searchStatus','Selecione pelo menos um tipo de vaga: CLT, PJ, Estágio, Temporário, Aprendiz ou Freelancer.');
+    toast('Marque pelo menos um tipo de vaga.');
+    return;
+  }
   $('searchBtn').disabled=true; $('statStatus').textContent='Buscando';
   const searchStarted=Date.now();
   notice('searchStatus','Buscando no RioVagas... 0s');
   clearInterval(searchElapsedTimer); searchElapsedTimer=setInterval(()=>{const sec=Math.floor((Date.now()-searchStarted)/1000);notice('searchStatus',`Buscando no RioVagas... ${sec}s`);},1000);
   try{
     await saveProfile();
-    const r=await fetch('/api/search',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({resumeId,filters:filters()})});
+    if(searchSelectionSeq!==candidateSelectionSeq||Number(candidateId)!==searchCandidateId||Number(resumeId)!==searchResumeId)return;
+    const r=await fetch('/api/search',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({resumeId:searchResumeId,filters:searchFilters})});
     const d=await r.json(); if(!r.ok) throw new Error(d.error||'Falha na busca');
+    if(searchSelectionSeq!==candidateSelectionSeq||Number(candidateId)!==searchCandidateId||Number(resumeId)!==searchResumeId)return;
     runId=d.runId; currentRunMode=$('submitMode').value==='live'?'live':'dry'; currentJobs=d.jobs||[];
     selectedJobIds=new Set(currentJobs.filter(isJobSelectable).map(j=>Number(j.id)));
     manuallyDeselectedJobIds=new Set();
@@ -616,20 +661,30 @@ $('searchBtn').addEventListener('click',async()=>{
     if((d.aiReviewPending||0)>0)startSearchReviewPoll(runId);
     setTimeout(()=>$('resultsCard').scrollIntoView({behavior:'smooth',block:'start'}),80);
     await loadCandidates(); renderCandidates();
-  }catch(err){notice('searchStatus',`Erro: ${err.message}`);$('statStatus').textContent='Erro';}
+  }catch(err){
+    if(searchSelectionSeq===candidateSelectionSeq&&Number(candidateId)===searchCandidateId){
+      notice('searchStatus',`Erro: ${err.message}`);$('statStatus').textContent='Erro';
+    }
+  }
   finally{clearInterval(searchElapsedTimer);searchElapsedTimer=null;$('searchBtn').disabled=false;}
 });
 
 async function refreshApplications(){
   if(!runId) return;
-  const r=await fetch(`/api/run/${runId}/applications`); if(!r.ok) return;
-  const rows=await r.json(); currentStatuses=new Map(rows.map(x=>[x.url,x])); renderJobs(currentJobs,currentStatuses);
+  const targetRun=Number(runId),targetCandidate=Number(candidateId),selectionSeq=candidateSelectionSeq;
+  const r=await fetch(`/api/run/${targetRun}/applications`); if(!r.ok) return;
+  const rows=await r.json();
+  if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==targetCandidate||Number(runId)!==targetRun)return;
+  currentStatuses=new Map(rows.map(x=>[x.url,x])); renderJobs(currentJobs,currentStatuses);
 }
 
 async function pollStatus(){
   if(!runId) return;
-  const r=await fetch(`/api/run/${runId}/status`); if(!r.ok) return;
-  const d=await r.json(),c=d.counts||{};
+  const targetRun=Number(runId),targetCandidate=Number(candidateId),selectionSeq=candidateSelectionSeq;
+  const r=await fetch(`/api/run/${targetRun}/status`); if(!r.ok) return;
+  const d=await r.json();
+  if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==targetCandidate||Number(runId)!==targetRun||Number(d.candidateId)!==targetCandidate)return;
+  const c=d.counts||{};
   currentRunMode=d.mode==='live'?'live':'dry';
   const statusLabel={PREFLIGHTING:'Pré-validando formulários',CANARY:'Validando primeiro envio',APPLYING:'Enviando candidaturas',RETRYING:'Retentando candidaturas',ERROR_PREFLIGHT:'Pré-voo bloqueou o envio',ERROR_DISPATCH_PAUSED:'Envio pausado por segurança',DONE:'Concluído'}[String(d.status||'').toUpperCase()]||d.status||'Processando';
   $('statStatus').textContent=statusLabel;
@@ -639,8 +694,9 @@ async function pollStatus(){
   if(d.status==='DONE'||d.status==='CANCELLED'||String(d.status).startsWith('ERROR')){
     clearInterval(pollTimer);pollTimer=null;$('applyBtn').disabled=false;
     await refreshApplications();await loadCandidates();renderCandidates();await loadPendingData();
-    const finalStatus=await fetch(`/api/run/${runId}/status`).then(x=>x.ok?x.json():null).catch(()=>null);
-    if(finalStatus)updateRunSummary(finalStatus.counts||{},Number(finalStatus.total||0),finalStatus.status);
+    if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==targetCandidate||Number(runId)!==targetRun)return;
+    const finalStatus=await fetch(`/api/run/${targetRun}/status`).then(x=>x.ok?x.json():null).catch(()=>null);
+    if(finalStatus&&selectionSeq===candidateSelectionSeq&&Number(candidateId)===targetCandidate&&Number(finalStatus.candidateId)===targetCandidate)updateRunSummary(finalStatus.counts||{},Number(finalStatus.total||0),finalStatus.status);
   }
 }
 

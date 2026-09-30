@@ -601,11 +601,19 @@ function titleLocation(title) {
   }
   return '';
 }
-function rioLocation(title,description){
-  const text=String(description||'');
-  const city=text.match(/\bCidade\s*:\s*([^;\n.]{2,80})/i)?.[1]?.trim()||'';
-  const neighborhood=text.match(/\bBairro\s*:\s*([^;\n.]{2,80})/i)?.[1]?.trim()||'';
-  if(city&&neighborhood)return neighborhood+' - '+city;
+function rioStructuredField(description,label){
+  const text=String(description||'').replace(/\s+/g,' ').trim();
+  if(!text)return '';
+  const next='Bairro|Cidade|Benefícios|Beneficios|Horário(?: de Expediente)?|Horario(?: de Expediente)?|Salário|Salario|Bolsa Auxílio|Bolsa Auxilio|Informações(?: Adicionais)?|Informacoes(?: Adicionais)?|Forma de Trabalho|Forma de trabalho|Regime de Contratação|Regime de Contratacao|Número de Vagas|Numero de Vagas|Atividades|Oferecemos|Cargo|Empresa|Formação(?: e experiências desejáveis)?|Formacao(?: e experiencias desejaveis)?';
+  const rx=new RegExp('\\b'+label+'\\s*:\\s*(.+?)(?=\\s+(?:'+next+')\\s*:|$)','ig');
+  const matches=[...text.matchAll(rx)];
+  return String(matches.at(-1)?.[1]||'').replace(/[.;,:\-–—\s]+$/g,'').trim();
+}
+export function rioLocation(title,description){
+  const city=rioStructuredField(description,'Cidade');
+  const neighborhood=rioStructuredField(description,'Bairro');
+  if(city&&neighborhood&&norm(city)!==norm(neighborhood))return neighborhood+' - '+city;
+  if(neighborhood)return neighborhood;
   if(city)return city;
   const fromTitle=titleLocation(title);
   if(/^(?:sem experiencia|sem experi[eê]ncia|\d+\s*vagas?)$/i.test(fromTitle))return '';

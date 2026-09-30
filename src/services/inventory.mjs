@@ -59,7 +59,7 @@ export function queryRioInventory(days=15,terms=[],limit=25000){
 export function terminalInventoryIds(candidateId){
   return new Set(db.prepare(`SELECT inventory_id
     FROM candidate_job_matches
-    WHERE candidate_id=? AND decision IN ('SENT','ALREADY_APPLIED')`).all(Number(candidateId)).map(x=>Number(x.inventory_id)).filter(Boolean));
+    WHERE candidate_id=? AND decision IN ('SENT','ALREADY_APPLIED','UNCERTAIN')`).all(Number(candidateId)).map(x=>Number(x.inventory_id)).filter(Boolean));
 }
 
 export function upsertCandidateMatch({candidateId,inventoryId,runId=null,score=0,decision='SEEN',reason='',rankPosition=0,batchNo=0}){
@@ -69,8 +69,8 @@ export function upsertCandidateMatch({candidateId,inventoryId,runId=null,score=0
     VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
     ON CONFLICT(candidate_id,inventory_id) DO UPDATE SET
       run_id=excluded.run_id,score=excluded.score,
-      decision=CASE WHEN candidate_job_matches.decision IN ('SENT','ALREADY_APPLIED') THEN candidate_job_matches.decision ELSE excluded.decision END,
-      reason=CASE WHEN candidate_job_matches.decision IN ('SENT','ALREADY_APPLIED') THEN candidate_job_matches.reason ELSE excluded.reason END,
+      decision=CASE WHEN candidate_job_matches.decision IN ('SENT','ALREADY_APPLIED','UNCERTAIN') THEN candidate_job_matches.decision ELSE excluded.decision END,
+      reason=CASE WHEN candidate_job_matches.decision IN ('SENT','ALREADY_APPLIED','UNCERTAIN') THEN candidate_job_matches.reason ELSE excluded.reason END,
       rank_position=excluded.rank_position,batch_no=excluded.batch_no,last_seen_at=CURRENT_TIMESTAMP`)
     .run(Number(candidateId),Number(inventoryId),runId?Number(runId):null,Number(score)||0,String(decision||'SEEN'),String(reason||''),Number(rankPosition)||0,Number(batchNo)||0);
 }

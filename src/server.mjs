@@ -64,8 +64,8 @@ const getJobs = id => db.prepare('SELECT * FROM jobs WHERE run_id=? AND selected
 const getBatchJobs = id => {
   const run=getRun(id); if(!run)return [];
   const batch=Math.max(1,Number(run.active_batch||1));
-  if(batch===1)return db.prepare(`SELECT * FROM jobs WHERE run_id=? AND ((sendable=1 AND batch_no=?) OR blocked_reason='ALREADY_SENT')
-    ORDER BY CASE WHEN blocked_reason='ALREADY_SENT' THEN 1 ELSE 0 END,score DESC`).all(id,batch);
+  if(batch===1)return db.prepare(`SELECT * FROM jobs WHERE run_id=? AND ((sendable=1 AND batch_no=?) OR blocked_reason IN ('ALREADY_SENT','ALREADY_UNCERTAIN'))
+    ORDER BY CASE WHEN blocked_reason IN ('ALREADY_SENT','ALREADY_UNCERTAIN') THEN 1 ELSE 0 END,score DESC`).all(id,batch);
   return db.prepare('SELECT * FROM jobs WHERE run_id=? AND sendable=1 AND batch_no=? ORDER BY score DESC').all(id,batch);
 };
 const getAllJobs = id => db.prepare('SELECT * FROM jobs WHERE run_id=? ORDER BY score DESC').all(id);
@@ -426,7 +426,7 @@ app.post('/api/search', async (req,res) => {
     const evidenceMatcher=compileSearchEvidence(searchTerms);
     const recent=recentJobs(raw,effectiveFilters.recencyDays).map(j=>addSearchEvidence(j,evidenceMatcher));
     const candidatePool=dedupeJobs(recent);
-    const historyRows=db.prepare("SELECT fingerprint,provider_job_id,status,last_run_id FROM candidate_job_history WHERE candidate_id=? AND status IN ('SENT','ALREADY_APPLIED')").all(resume.candidate_id);
+    const historyRows=db.prepare("SELECT fingerprint,provider_job_id,status,last_run_id FROM candidate_job_history WHERE candidate_id=? AND status IN ('SENT','ALREADY_APPLIED','UNCERTAIN')").all(resume.candidate_id);
     const sentHistory=new Map(historyRows.map(x=>[x.fingerprint,x]));
     const sentProviderIds=new Set(historyRows.map(x=>String(x.provider_job_id||'')).filter(Boolean));
     const terminalIds=terminalInventoryIds(resume.candidate_id);
@@ -453,8 +453,10 @@ app.post('/api/search', async (req,res) => {
     prepared.forEach((j,index)=>{j._rank=index+1;});
     const alreadySent=alreadySentPool.map((j,index)=>{
       const fp=jobFingerprint(j),hist=sentHistory.get(fp)||{};
-      return {...j,score:Number(j.score||0),sendable:0,reason:'ALREADY_SENT',alreadySent:true,
-        previousStatus:hist.status||'SENT',previousRunId:hist.last_run_id||null,_rank:prepared.length+index+1,_batch:0,_selected:0};
+      const previousStatus=String(hist.status||'SENT').toUpperCase();
+      const legacyUncertain=previousStatus==='UNCERTAIN';
+      return {...j,score:Number(j.score||0),sendable:0,reason:legacyUncertain?'ALREADY_UNCERTAIN':'ALREADY_SENT',alreadySent:!legacyUncertain,
+        previousStatus,previousRunId:hist.last_run_id||null,_rank:prepared.length+index+1,_batch:0,_selected:0};
     });
     let sendableIndex=0;
     for(const j of prepared) if(j.sendable){sendableIndex++;j._batch=Math.floor((sendableIndex-1)/batchSize)+1;j._selected=j._batch===1?1:0;} else {j._batch=0;j._selected=0;}
@@ -509,7 +511,7 @@ app.post('/api/search', async (req,res) => {
     const finalSendable=finalAll.filter(j=>Number(j.sendable)===1);
     const finalBlocked=finalAll.filter(j=>['LOGIN_REQUIRED','EMAIL_REQUIRED'].includes(j.blocked_reason));
     const finalPending=finalAll.filter(j=>j.blocked_reason==='AI_REVIEW_PENDING');
-    const finalUnverified=finalAll.filter(j=>Number(j.sendable)===0&&!['LOGIN_REQUIRED','EMAIL_REQUIRED','AI_REVIEW_PENDING','ALREADY_SENT'].includes(j.blocked_reason));
+    const finalUnverified=finalAll.filter(j=>Number(j.sendable)===0&&!['LOGIN_REQUIRED','EMAIL_REQUIRED','AI_REVIEW_PENDING','ALREADY_SENT','ALREADY_UNCERTAIN'].includes(j.blocked_reason));
     const finalAlreadySent=finalAll.filter(j=>j.blocked_reason==='ALREADY_SENT');
     const finalBatches=Math.max(1,...finalSendable.map(j=>Number(j.batch_no||1)));
     recordRunEvent({runId,candidateId:resume.candidate_id,type:'SEARCH_COMPLETE',data:{inventory:raw.length,pool:candidatePool.length,ranked:ranked.length,sendable:finalSendable.length,selected:finalSelected.length,aiPending:finalPending.length}});
@@ -586,8 +588,8 @@ async function processRun(runId,onlyErrors=false){
         WHERE candidate_id=? AND source=? AND provider_job_id=? ORDER BY id LIMIT 1`).get(run.candidate_id,job.source||'',providerJobId);
       if(existing){
         db.prepare(`UPDATE candidate_job_history SET fingerprint=?,url=?,title=?,company=?,location=?,published_at=?,last_seen_at=CURRENT_TIMESTAMP,
-          last_run_id=CASE WHEN status IN ('SENT','ALREADY_APPLIED') THEN last_run_id ELSE ? END,
-          status=CASE WHEN status IN ('SENT','ALREADY_APPLIED') THEN status ELSE ? END WHERE id=?`)
+          last_run_id=CASE WHEN status IN ('SENT','ALREADY_APPLIED','UNCERTAIN') THEN last_run_id ELSE ? END,
+          status=CASE WHEN status IN ('SENT','ALREADY_APPLIED','UNCERTAIN') THEN status ELSE ? END WHERE id=?`)
           .run(job.source_key,job.url||'',job.title||'',job.company||'',job.location||'',job.published_at||'',runId,status,existing.id);
         return;
       }
@@ -599,8 +601,8 @@ async function processRun(runId,onlyErrors=false){
         provider_job_id=CASE WHEN excluded.provider_job_id<>'' THEN excluded.provider_job_id ELSE candidate_job_history.provider_job_id END,
         source=excluded.source,url=excluded.url,title=excluded.title,company=excluded.company,location=excluded.location,published_at=excluded.published_at,
         last_seen_at=CURRENT_TIMESTAMP,
-        last_run_id=CASE WHEN candidate_job_history.status IN ('SENT','ALREADY_APPLIED') THEN candidate_job_history.last_run_id ELSE excluded.last_run_id END,
-        status=CASE WHEN candidate_job_history.status IN ('SENT','ALREADY_APPLIED') THEN candidate_job_history.status ELSE excluded.status END`)
+        last_run_id=CASE WHEN candidate_job_history.status IN ('SENT','ALREADY_APPLIED','UNCERTAIN') THEN candidate_job_history.last_run_id ELSE excluded.last_run_id END,
+        status=CASE WHEN candidate_job_history.status IN ('SENT','ALREADY_APPLIED','UNCERTAIN') THEN candidate_job_history.status ELSE excluded.status END`)
       .run(run.candidate_id,job.source_key,providerJobId,job.source||'',job.url||'',job.title||'',job.company||'',job.location||'',job.published_at||'',status,runId);
   };
   const markResult=(job,result,eventType='PREFLIGHT_RESULT')=>{

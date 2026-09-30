@@ -102,14 +102,17 @@
             </label>
             <label>Vagas publicadas nos &uacute;ltimos dias<select id="recencyDays"><option value="7">7 dias</option><option value="15" selected>15 dias</option><option value="30">30 dias</option></select></label>
 </div>
-          <div class="chip-group">
-            <label><input id="clt" type="checkbox" checked><span>CLT</span></label>
-            <label><input id="pj" type="checkbox" checked><span>PJ</span></label>
-            <label><input id="internship" type="checkbox" checked><span>Estágio</span></label>
-            <label><input id="temporary" type="checkbox" checked><span>Temporário</span></label>
-            <label><input id="apprentice" type="checkbox" checked><span>Aprendiz</span></label>
-            <label><input id="freelance" type="checkbox" checked><span>Freelancer</span></label>
-          </div>
+          <fieldset class="contract-filter">
+            <legend>Tipo de vaga <span>marque uma ou mais opções</span></legend>
+            <div class="contract-options">
+              <label class="contract-option"><input id="clt" type="checkbox" checked><span>CLT</span></label>
+              <label class="contract-option"><input id="pj" type="checkbox" checked><span>PJ</span></label>
+              <label class="contract-option"><input id="internship" type="checkbox" checked><span>Estágio</span></label>
+              <label class="contract-option"><input id="temporary" type="checkbox" checked><span>Temporário</span></label>
+              <label class="contract-option"><input id="apprentice" type="checkbox" checked><span>Aprendiz</span></label>
+              <label class="contract-option"><input id="freelance" type="checkbox" checked><span>Freelancer</span></label>
+            </div>
+          </fieldset>
           <div class="form-grid two compact-grid">
             <label>Pretensão salarial padrão<input id="salaryExpectation" value="A combinar"></label>
             <label>Execução
