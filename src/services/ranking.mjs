@@ -59,11 +59,20 @@ function remoteRegionOk(job,filters){
   return !/only|apenas|eua|usa|united states|canada|europe|europa|uk|united kingdom/.test(loc);
 }
 
+function effectiveLocationText(job){
+  const loc=String(job?.location||'').trim();
+  const desc=String(job?.description||'');
+  const city=desc.match(/\bCidade\s*:\s*([^;\n.]{2,80})/i)?.[1]?.trim()||'';
+  const neighborhood=desc.match(/\bBairro\s*:\s*([^;\n.]{2,80})/i)?.[1]?.trim()||'';
+  const suspicious=!loc||/^(?:sem experiencia|sem experi[eê]ncia|[0-9]+\s*vagas?|a combinar|pretens[aã]o salarial)$/i.test(loc);
+  return [suspicious?'':loc,neighborhood,city,job?.title||''].filter(Boolean).join(' ');
+}
+
 const rjOtherMunicipality=/\b(?:niteroi|duque de caxias|nova iguacu|sao goncalo|nilopolis|sao joao de meriti|belford roxo|mesquita|queimados|japeri|seropedica|itaguai|mage|guapimirim|itabora[ií]|marica|tangua|petropolis|teresopolis|nova friburgo|volta redonda|barra mansa|resende|macae|campos dos goytacazes|cabo frio|araruama|saquarema|rio das ostras|angra dos reis|paraty)\b/;
 function rioVagasRioCityInference(job,cities){
   const wantsRio=cities.some(x=>norm(x)==='rio de janeiro');
   if(!wantsRio||!/^RioVagas$/i.test(job.source||''))return false;
-  const loc=norm(job.location||'');
+  const loc=norm(effectiveLocationText(job));
   if(!loc)return true;
   return !rjOtherMunicipality.test(loc);
 }
@@ -71,7 +80,7 @@ function rioVagasRioCityInference(job,cities){
 function locationOk(job,filters,flags){
   if(filters.nationwide)return true;
   if(flags.remote&&filters.workMode!=='onsite_only')return remoteRegionOk(job,filters);
-  const text=norm(`${job.location||''} ${job.title||''}`).replace(/rio de jan\.{2,}/g,'rio de janeiro');
+  const text=norm(effectiveLocationText(job)).replace(/rio de jan\.{2,}/g,'rio de janeiro');
   const cities=Array.isArray(filters.cities)?filters.cities.filter(Boolean):[filters.city].filter(Boolean);
   const states=Array.isArray(filters.states)?filters.states.filter(Boolean):[filters.state].filter(Boolean);
   const cityHit=cities.some(x=>text.includes(norm(x)));
@@ -92,7 +101,7 @@ function locationOk(job,filters,flags){
 function locationBoost(job,filters,flags){
   if(filters.nationwide)return 0;
   if(flags.remote&&filters.workMode!=='onsite_only')return 0.05;
-  const text=norm(`${job.location||''} ${job.title||''}`).replace(/rio de jan\.{2,}/g,'rio de janeiro');
+  const text=norm(effectiveLocationText(job)).replace(/rio de jan\.{2,}/g,'rio de janeiro');
   const cities=Array.isArray(filters.cities)?filters.cities.filter(Boolean):[filters.city].filter(Boolean);
   const states=Array.isArray(filters.states)?filters.states.filter(Boolean):[filters.state].filter(Boolean);
   if(cities.some(x=>text.includes(norm(x))))return 0.12;
@@ -168,10 +177,11 @@ function plannedSpecialtyMismatch(job,filters){
 }
 function plannedRoleMismatch(job,filters){
   const role=norm(roleHeadOf(job?.title||''));
+  if(approvedRoleFit(role,filters))return false;
   const plan=norm([...(filters?.searchFamilies||[]),...(filters?.searchCoreTerms||[]),...(filters?.searchAdjacentTerms||[])].join(' '));
   const divergent=[
     {role:/\b(?:atendente|atendimento|recepcionista)\b/,plan:/\b(?:atendimento|recepcao|customer service|customer success)\b/},
-    {role:/\b(?:assistente|auxiliar)\s+administrativ[oa]\b/,plan:/\b(?:administrativ|administracao|financeiro|rh|recursos humanos)\b/},
+    {role:/\b(?:assistente|auxiliar)\s+(?:administrativ[oa]|administracao)\b/,plan:/\b(?:administrativ|administracao|financeiro|rh|recursos humanos)\b/},
     {role:/\b(?:vendedor|vendedora|caixa)\b/,plan:/\b(?:vendas|comercial|varejo|caixa)\b/}
   ];
   return divergent.some(rule=>rule.role.test(role)&&!rule.plan.test(plan));
@@ -194,7 +204,7 @@ function plannedDomainMismatch(job,filters){
 function roleAliasSupported(role,filters){
   const r=norm(role),plan=norm([...(filters?.searchFamilies||[]),...(filters?.searchCoreTerms||[]),...(filters?.searchAdjacentTerms||[])].join(' '));
   if(/\b(?:atendente|atendimento|recepcionista|sac)\b/.test(r)&&/\b(?:atendimento|recepcao|customer service|customer success)\b/.test(plan))return true;
-  if(/\b(?:auxiliar|assistente)\s+(?:administrativ[oa]|de escritorio)|\bapoio administrativo\b/.test(r)&&/\b(?:administrativ|administracao|apoio administrativo)\b/.test(plan))return true;
+  if(/\b(?:auxiliar|assistente)\s+(?:administrativ[oa]|administracao|de escritorio)|\bapoio administrativo\b/.test(r)&&/\b(?:administrativ|administracao|apoio administrativo)\b/.test(plan))return true;
   if(/\b(?:operador(?:a)? de caixa|caixa)\b/.test(r)&&/\bcaixa\b/.test(plan))return true;
   if(/\b(?:vendedor|vendedora|assistente de vendas)\b/.test(r)&&/\b(?:vendas|comercial|varejo)\b/.test(plan))return true;
   return false;
@@ -210,18 +220,48 @@ function clearlyOffTrackRole(role,filters){
   return groups.some(g=>g.rx.test(r)&&!g.support.test(plan));
 }
 function currentStudyActive(profileText){
-  const t=norm(profileText||'');
-  if(!t)return false;
-  if(/\b(?:nao\s+cursando|matricula\s+trancada|curso\s+trancado|curso\s+interrompido)\b/.test(t))return false;
-  return /\b(?:cursando|matriculad[oa]|em\s+andamento|\d+[º°]?\s*(?:semestre|periodo)|previsao\s+(?:de\s+)?conclusao|conclusao\s+prevista)\b/.test(t)
-    || /\b20\d{2}\s*(?:-|a|ate)\s*(?:atual|presente)\b/.test(t);
+  const lines=String(profileText||'').split(/\r?\n/).map(x=>norm(x)).filter(Boolean);
+  if(!lines.length)return false;
+  const active=/\b(?:cursando|matriculad[oa]|em\s+andamento|\d+[º°]?\s*(?:semestre|periodo)|previsao\s+(?:de\s+)?conclusao|conclusao\s+prevista|20\d{2}\s*(?:-|a|ate)\s*(?:atual|presente))\b/;
+  const study=/\b(?:bacharelado|graduacao|licenciatura|tecnologo|universidade|faculdade|curso superior|curso tecnico|tecnico em|ensino medio)\b/;
+  for(let i=0;i<lines.length;i++){
+    if(!active.test(lines[i]))continue;
+    const context=lines.slice(Math.max(0,i-2),Math.min(lines.length,i+2)).join(' ');
+    if(/\b(?:nao\s+cursando|matricula\s+trancada|curso\s+trancado|curso\s+interrompido)\b/.test(context))continue;
+    if(!study.test(context))continue;
+    const onlyCompletedSecondary=/ensino medio[^.]{0,100}(?:completo|concluido)/.test(context)&&!/bacharelado|graduacao|licenciatura|tecnologo|universidade|faculdade|curso superior|curso tecnico|tecnico em/.test(context);
+    if(onlyCompletedSecondary)continue;
+    return true;
+  }
+  return false;
 }
 function higherEducationActive(profileText){
-  return currentStudyActive(profileText)||/\b(?:bacharelado|graduacao|universidade|faculdade)\b/.test(norm(profileText));
+  const lines=String(profileText||'').split(/\r?\n/).map(x=>norm(x)).filter(Boolean);
+  const higher=/\b(?:bacharelado|graduacao|licenciatura|tecnologo|universidade|faculdade|curso superior)\b/;
+  const active=/\b(?:cursando|matriculad[oa]|em\s+andamento|\d+[º°]?\s*(?:semestre|periodo)|previsao\s+(?:de\s+)?conclusao|conclusao\s+prevista|20\d{2}\s*(?:-|a|ate)\s*(?:atual|presente))\b/;
+  for(let i=0;i<lines.length;i++){
+    const context=lines.slice(Math.max(0,i-2),Math.min(lines.length,i+2)).join(' ');
+    if(higher.test(context)&&active.test(context))return true;
+  }
+  return false;
 }
 function completedHigherEducation(profileText){
   const t=norm(profileText||'');
   return /\b(?:bacharelado|graduacao|licenciatura|tecnologo|curso superior)[^\n]{0,140}\b(?:concluido|concluida|completo|completa|finalizado|finalizada)\b/.test(t)||/\b(?:concluido|concluida|completo|completa|finalizado|finalizada)[^\n]{0,140}\b(?:bacharelado|graduacao|licenciatura|tecnologo|curso superior)\b/.test(t);
+}
+function requiresMandatoryActiveHigherEducation(value){
+  const text=norm(value||'');
+  const segments=text.split(/[.;\n]+/).map(x=>x.trim()).filter(Boolean);
+  for(const segment of segments){
+    const mentionsHigher=/\b(?:ensino superior|faculdade|graduacao|curso superior)\b/.test(segment);
+    const active=/\b(?:cursando|em andamento|matriculad[oa]|estudante|periodo|semestre|previsao[^.]{0,40}(?:formatura|conclusao))\b/.test(segment);
+    if(!mentionsHigher||!active)continue;
+    if(/\b(?:desejavel|preferencial|preferencialmente|diferencial|sera um diferencial)\b/.test(segment))continue;
+    const secondaryAlternative=/\bensino medio\b.{0,80}\bou\b.{0,100}\b(?:ensino superior|faculdade|graduacao|curso superior)\b|\b(?:ensino superior|faculdade|graduacao|curso superior)\b.{0,80}\bou\b.{0,100}\bensino medio\b/.test(segment);
+    if(secondaryAlternative)continue;
+    return true;
+  }
+  return false;
 }
 
 const genericRoleTokens=new Set('estagio estagiario estagiaria assistente auxiliar analista junior jr trainee vaga area professor professora monitor monitora mediador mediadora inspetor inspetora secretario secretaria recepcionista atendente agente operador operadora especialista consultor consultora coordenador coordenadora supervisor supervisora gerente diretor diretora orientador orientadora'.split(' ').map(stem));
@@ -276,8 +316,8 @@ function explicitRoleFit(value,terms){
     if(rolePhraseMatch(role,term))return true;
     const termTokens=roleTokens(term);
     const meaningful=[...termTokens].filter(x=>!genericRoleTokens.has(x));
-    if(meaningful.length>=2&&meaningful.every(x=>roleSet.has(x)))return true;
-    if(meaningful.length===1&&roleSet.has(meaningful[0])){
+    if(meaningful.length>=2&&meaningful.every(x=>conceptSetHas(roleSet,x)))return true;
+    if(meaningful.length===1&&conceptSetHas(roleSet,meaningful[0])){
       const termStructural=structuralRoleTokens(term);
       // Uma única palavra de domínio só vale se o tipo estrutural do cargo também combinar.
       if(!termStructural.size||[...termStructural].some(x=>roleStructural.has(x)))return true;
@@ -301,7 +341,7 @@ function coreRoleFit(roleHead,filters){
     const termKinds=new Set([...termSet].filter(x=>genericRoleTokens.has(x)));
     const meaningful=[...termSet].filter(x=>!genericRoleTokens.has(x));
     const kindMatch=termKinds.size===0||[...termKinds].some(x=>roleKinds.has(x));
-    if(kindMatch&&meaningful.length>=1&&meaningful.every(x=>roleSet.has(x)))return true;
+    if(kindMatch&&meaningful.length>=1&&meaningful.every(x=>conceptSetHas(roleSet,x)))return true;
   }
   return false;
 }
@@ -568,6 +608,8 @@ export function prefilterJobsForAI(jobs,profile,filters){
     const requirementText=norm(job.description||'');
     const requiresCompletedHigher=/\b(?:ensino|nivel|curso)\s+superior\s+completo\b|\bgraduacao\s+(?:completa|concluida)\b|\bformacao\s+superior\s+completa\b/.test(requirementText);
     if(requiresCompletedHigher&&!completedHigherEducation(profileText))return null;
+    const requiresActiveHigher=requiresMandatoryActiveHigherEducation(requirementText);
+    if(requiresActiveHigher&&!higherEducationActive(profileText))return null;
     const hasWorkHistory=/\b(?:experiencias? profissionais?|historico profissional|trabalhei|atuei|cargo|empresa)\b/.test(profileText)||/(?:19|20)\d{2}\s*[-–—]\s*(?:(?:19|20)\d{2}|atual|presente)/.test(profileText);
     const mandatoryExperience=/experiencia\s+(?:obrigatoria|necessaria|comprovada|exigida)|(?:exige|requer)[^.]{0,40}experiencia/.test(requirementText);
     if(mandatoryExperience&&!hasWorkHistory)return null;

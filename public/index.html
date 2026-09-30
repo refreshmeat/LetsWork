@@ -153,7 +153,9 @@
                 <option value="pending">Ainda não processadas</option>
                 <option value="READY">Validadas</option>
                 <option value="SENT">Enviadas</option>
-                <option value="NEEDS_DATA">Precisam de dado</option>
+                <option value="PROFILE_REQUIRED">Dados do perfil</option>
+                <option value="INVALID_FORM">Formulário inválido</option>
+                <option value="NEEDS_DATA">Pendência antiga</option>
                 <option value="ERROR">Com erro</option>
                 <option value="UNCERTAIN">Sem confirmação</option>
                 <option value="CLOSED">Encerradas</option>
@@ -221,7 +223,7 @@
         </section>
         <section id="pendingDataPanel" class="panel hidden">
           <div class="panel-head">
-            <div><span class="kicker">Pendências</span><h2>Dados necessários para candidaturas</h2><p id="pendingDataMeta" class="hint">Responda uma vez; o LetsWork reutiliza nas próximas vagas.</p></div>
+            <div><span class="kicker">Perfil complementar</span><h2>Dados necessários para candidaturas</h2><p id="pendingDataMeta" class="hint">O LetsWork resolve sozinho o que puder. Fatos pessoais realmente ausentes são pedidos uma vez e reutilizados nas próximas vagas.</p></div>
             <button id="savePendingData" class="primary" type="button">Salvar respostas</button>
           </div>
           <div id="pendingDataList" class="form-grid two"></div>

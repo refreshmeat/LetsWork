@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'node:crypto';
-import { aiAnswers, safeFallbackAnswer } from './answers.mjs';
+import { aiAnswers, safeFallbackAnswer, canonicalFormQuestionKey } from './answers.mjs';
 
 const UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36';
 const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
@@ -49,7 +49,8 @@ function formSchema(formHtml){
   const known=name=>[
     'ciente','ciente_email','candidato_vaga_nonce_field','_wp_http_referer','post_id',
     'nome_candidato','email_candidato','celular_candidato','telefone_candidato','forma_envio','anexo',
-    'curriculo_candidato','pretensao_salarial','apresentacao_candidato','form_submit'
+    'curriculo_candidato','pretensao_salarial','apresentacao_candidato','form_submit','newsletter_rv',
+    'tipo_cota','tipo_deficiencia','cid','laudo','cota_inss'
   ].includes(name)||/^perguntas\[[^\]]+\]$/.test(name)||/^respostas\[[^\]]+\]$/.test(name);
   const unsupportedRequired=[...new Set(controls.filter(x=>x.required&&!known(x.name)).map(x=>x.name))];
   const signature=createHash('sha256').update(JSON.stringify(controls.map(x=>({
@@ -59,15 +60,29 @@ function formSchema(formHtml){
     controls,
     hasAttachment:controls.some(x=>x.name==='anexo'&&x.type==='file'),
     hasTextResume:controls.some(x=>x.name==='curriculo_candidato'),
+    hasPcdQuota:controls.some(x=>['tipo_cota','tipo_deficiencia','cid','laudo','cota_inss'].includes(x.name)),
     deliveryOptions:controls.filter(x=>x.name==='forma_envio').map(x=>x.value).filter(Boolean),
     unsupportedRequired,
     signature
   };
 }
+export function invalidQuestionShape(q){
+  const key=canonicalFormQuestionKey(q?.question||'');
+  const options=(q?.options||[]).map(norm).filter(Boolean);
+  const binary=options.length===2&&options.includes('sim')&&options.includes('nao');
+  const freeTextKeys=new Set(['age','birth_date','neighborhood','address','phone','cpf','cep','uniform_shoe_size']);
+  if(binary&&freeTextKeys.has(key)){
+    return 'Pergunta "'+String(q?.question||'')+'" exige dado textual, mas o anúncio oferece somente Sim/Não.';
+  }
+  if(binary&&/^(?:travel_time|travel_distance|transport_cost|transport_segments):/.test(key)){
+    return 'Pergunta "'+String(q?.question||'')+'" exige valor de trajeto/transporte, mas o anúncio oferece somente Sim/Não.';
+  }
+  return '';
+}
 function closedError(message){
   const e=new Error(message);e.code='RIO_CLOSED';return e;
 }
-async function fetchRioGet(url,{timeout=10000,attempts=3}={}){
+async function fetchRioGet(url,{timeout=6500,attempts=2}={}){
   let lastError=null;
   for(let attempt=1;attempt<=attempts;attempt++){
     try{
@@ -106,21 +121,42 @@ export function parseRioFormHtml(html,applyUrl){
   return {html:formHtml,nonce,postId,referer:refTag.value||url.pathname+url.search,questions,schema};
 }
 
-export async function resolveRioApplyForm(job,{timeout=10000,attempts=3}={}){
+export async function resolveRioApplyForm(job,{timeout=8000,attempts=2}={}){
+  const providerId=String(job?.provider_job_id||job?.externalId||job?.external_id||'').trim();
   let applyUrl=/\/enviar-curriculo-gratis\//i.test(String(job?.url||''))?String(job.url):'';
-  if(!applyUrl){
-    const r=await fetchRioGet(job.url,{timeout,attempts});
-    const html=await r.text();
-    if([404,410].includes(r.status)||pageLooksClosed(html,r.url))throw closedError('RioVagas: vaga encerrada ou removida');
-    const m=html.match(/href=["']([^"']*enviar-curriculo-gratis\/?\?vaga=[^"'#]+)["']/i);
-    if(!m?.[1])throw closedError('RioVagas: vaga não possui mais formulário ativo de candidatura');
-    applyUrl=new URL(htmlDecode(m[1]),r.url||job.url).toString();
+  let directFromId=false;
+  if(!applyUrl&&/^\d+$/.test(providerId)){
+    applyUrl='https://riovagas.com.br/enviar-curriculo-gratis/?vaga='+encodeURIComponent(providerId);
+    directFromId=true;
   }
-  const r=await fetchRioGet(applyUrl,{timeout,attempts});
+
+  if(applyUrl){
+    try{
+      const r=await fetchRioGet(applyUrl,{timeout,attempts});
+      const html=await r.text();
+      if([404,410].includes(r.status)||pageLooksClosed(html,r.url))throw closedError('RioVagas: formulário da vaga foi encerrado');
+      if(!r.ok)throw new Error('RioVagas: formulário respondeu HTTP '+r.status);
+      return {applyUrl,...parseRioFormHtml(html,applyUrl)};
+    }catch(e){
+      const timeoutLike=/timeout|aborted/i.test(String(e?.message||e));
+      if(!directFromId||timeoutLike||e?.code==='RIO_CLOSED')throw e;
+      // ID antigo/inconsistente: descobre o link atual na página da vaga como fallback.
+      applyUrl='';
+    }
+  }
+
+  const r=await fetchRioGet(job.url,{timeout,attempts});
   const html=await r.text();
-  if([404,410].includes(r.status)||pageLooksClosed(html,r.url))throw closedError('RioVagas: formulário da vaga foi encerrado');
-  if(!r.ok)throw new Error('RioVagas: formulário respondeu HTTP '+r.status);
-  return {applyUrl,...parseRioFormHtml(html,applyUrl)};
+  if([404,410].includes(r.status)||pageLooksClosed(html,r.url))throw closedError('RioVagas: vaga encerrada ou removida');
+  const m=html.match(/href=["']([^"']*enviar-curriculo-gratis\/?\?vaga=[^"'#]+)["']/i);
+  if(!m?.[1])throw closedError('RioVagas: vaga não possui mais formulário ativo de candidatura');
+  applyUrl=new URL(htmlDecode(m[1]),r.url||job.url).toString();
+
+  const fr=await fetchRioGet(applyUrl,{timeout,attempts});
+  const formHtml=await fr.text();
+  if([404,410].includes(fr.status)||pageLooksClosed(formHtml,fr.url))throw closedError('RioVagas: formulário da vaga foi encerrado');
+  if(!fr.ok)throw new Error('RioVagas: formulário respondeu HTTP '+fr.status);
+  return {applyUrl,...parseRioFormHtml(formHtml,applyUrl)};
 }
 export async function checkRioVagasHealth(job){
   try{
@@ -176,6 +212,14 @@ export async function applyRioVagasDirect(job,resumeFile,profile,prefs={},option
     return {status:'ERROR',error:String(e?.message||e)};
   }
   if(form.schema?.unsupportedRequired?.length)return {status:'ERROR',error:'RioVagas: formulário mudou e possui campo obrigatório ainda não suportado: '+form.schema.unsupportedRequired.join(', ')};
+  if(form.schema?.hasPcdQuota){
+    const explicitPcd=profile?.pcd===true||String(profile?.pcd||'').toLowerCase()==='true';
+    const explicitInss=profile?.inssRehabilitated===true||String(profile?.inssRehabilitated||'').toLowerCase()==='true';
+    if((prefs?.pcdMode||'exclude')==='exclude'&&!explicitPcd&&!explicitInss)
+      return {status:'SKIPPED_INCOMPATIBLE',error:'Vaga com formulário exclusivo para PCD/reabilitado do INSS; candidato não marcado nessa modalidade'};
+    if(!explicitPcd&&!explicitInss)
+      return {status:'PROFILE_REQUIRED',error:'Dados do perfil necessários: condição PCD/INSS confirmada'};
+  }
   if(!form.schema?.hasAttachment&&!form.schema?.hasTextResume)return {status:'ERROR',error:'RioVagas: formulário ativo não oferece meio suportado para enviar o currículo'};
   if(!form.schema?.hasAttachment&&form.schema?.hasTextResume&&!String(profile.baseResumeText||'').trim())
     return {status:'ERROR',error:'RioVagas: formulário exige currículo em texto e o currículo-base textual não está disponível'};
@@ -183,18 +227,28 @@ export async function applyRioVagasDirect(job,resumeFile,profile,prefs={},option
   const effectivePrefs=resolvedPrefs(job,prefs);
   const questions=form.questions.map(q=>({id:String(q.id),question:q.question,options:q.options}));
   const answers=questions.length?await aiAnswers(questions,profile,effectivePrefs,job).catch(()=>new Map()):new Map();
-  const resolved=[];
+  const resolved=[],missingQuestions=[],invalidQuestions=[];
   for(const q of questions){
+    const invalid=invalidQuestionShape(q);
+    if(invalid){invalidQuestions.push(invalid);continue;}
     const answer=answers.get(String(q.id))||safeFallbackAnswer(q.question,q.options,profile,effectivePrefs,job);
-    if(!answer)return {status:'NEEDS_DATA',error:'Campos obrigatórios sem dado confirmado: '+q.question,preflight};
+    if(!answer){
+      const key=canonicalFormQuestionKey(q.question);
+      if(/^(?:proximity|access|travel_time|travel_distance|transport_cost|transport_segments):$/.test(key))
+        invalidQuestions.push('Formulário sem localização suficiente para responder: '+q.question);
+      else missingQuestions.push(q.question);
+      continue;
+    }
     let value=String(answer);
     if(q.options.length){
       const exact=q.options.find(x=>norm(x)===norm(value))||q.options.find(x=>norm(x).includes(norm(value))||norm(value).includes(norm(x)));
-      if(!exact)return {status:'NEEDS_DATA',error:'Resposta segura não encontrada para: '+q.question,preflight};
+      if(!exact){missingQuestions.push(q.question);continue;}
       value=exact;
     }
     resolved.push({id:q.id,question:q.question,value});
   }
+  if(invalidQuestions.length)return {status:'INVALID_FORM',error:[...new Set(invalidQuestions)].join(' | '),preflight};
+  if(missingQuestions.length)return {status:'PROFILE_REQUIRED',error:'Dados do perfil necessários: '+[...new Set(missingQuestions)].join(' | '),preflight};
   const data=new FormData();
   data.set('ciente','on');
   data.set('ciente_email','on');
@@ -210,6 +264,21 @@ export async function applyRioVagasDirect(job,resumeFile,profile,prefs={},option
   const textMode=deliveryOptions.find(x=>!/anexo|arquivo/i.test(norm(x)));
   const delivery=form.schema?.hasAttachment?(attachmentMode||deliveryOptions[0]||'anexo'):(textMode||deliveryOptions[0]||'texto');
   data.set('forma_envio',delivery);
+  if(form.schema?.hasPcdQuota){
+    const explicitPcd=profile?.pcd===true||String(profile?.pcd||'').toLowerCase()==='true';
+    const explicitInss=profile?.inssRehabilitated===true||String(profile?.inssRehabilitated||'').toLowerCase()==='true';
+    if(explicitPcd){
+      data.set('tipo_cota','pcd');
+      const type=String(profile?.disabilityType||'').trim(),cid=String(profile?.cid||'').trim(),laudo=String(profile?.medicalReportDate||'').trim();
+      if(!type||!cid||!laudo)return {status:'PROFILE_REQUIRED',error:'Dados do perfil necessários: tipo de deficiência, CID e data do laudo',preflight};
+      data.set('tipo_deficiencia',type);data.set('cid',cid);data.set('laudo',laudo);
+    }else if(explicitInss){
+      data.set('tipo_cota','inss');
+      const rehab=String(profile?.inssRehabilitation||'').trim();
+      if(!rehab)return {status:'PROFILE_REQUIRED',error:'Dados do perfil necessários: dados de reabilitação do INSS',preflight};
+      data.set('cota_inss',rehab);
+    }
+  }
   if(/name=['"]pretensao_salarial['"]/i.test(form.html))data.set('pretensao_salarial',String(effectivePrefs.salaryExpectation||'A combinar'));
   if(/name=['"]apresentacao_candidato['"]/i.test(form.html))data.set('apresentacao_candidato',intro(job,profile));
   for(const q of resolved){data.set('perguntas['+q.id+']',q.question);data.set('respostas['+q.id+']',q.value);}

@@ -3,9 +3,9 @@ import path from 'path';
 import { db } from '../src/db.mjs';
 import { queryRioInventory, sourceRegistry } from '../src/services/inventory.mjs';
 import { prefilterJobsForAI } from '../src/services/ranking.mjs';
-import { knownAnswer, aiAnswers, canonicalFormQuestionKey } from '../src/apply/answers.mjs';
+import { knownAnswer, aiAnswers, canonicalFormQuestionKey, accessDestination } from '../src/apply/answers.mjs';
 import { inferProfile } from '../src/services/resume.mjs';
-import { applyRioVagasDirect, parseRioFormHtml } from '../src/apply/rio.mjs';
+import { applyRioVagasDirect, parseRioFormHtml, invalidQuestionShape } from '../src/apply/rio.mjs';
 
 function assert(condition,message){
   if(!condition)throw new Error(message);
@@ -135,10 +135,27 @@ const inferredContactProfile=inferProfile('CRISTIANO TESTE\n33 ANOS\nRUA ALBANO,
 assert(inferredContactProfile.phone==='(21) 99042-8876','Telefone com travessão/pontuação não foi normalizado');
 assert(inferredContactProfile.age==='33','Idade explícita do currículo deixou de ser extraída');
 assert(/PRAÇA SECA/i.test(inferredContactProfile.neighborhood),'Bairro no final do endereço deixou de ser extraído');
+assert(inferredContactProfile.nationality==='Brasileira','Nacionalidade padrão brasileira deixou de ser aplicada');
+assert(!String(inferredContactProfile.naturality||'').trim(),'Naturalidade foi inferida indevidamente a partir da residência');
+const explicitForeign=inferProfile('CANDIDATO TESTE\nNacionalidade: Portuguesa\nNaturalidade: Lisboa\nRio de Janeiro, RJ, Brasil');
+assert(explicitForeign.nationality==='Portuguesa','Nacionalidade explícita deixou de prevalecer sobre o padrão');
+assert(explicitForeign.naturality==='Lisboa','Naturalidade explícita deixou de ser preservada');
 assert(canonicalFormQuestionKey('Qual bairro você mora?')===canonicalFormQuestionKey('Lugar que reside?'),'Variações de pergunta de bairro não foram agrupadas');
-assert(canonicalFormQuestionKey('Possui fácil acesso à Zona Sul?')===canonicalFormQuestionKey('Reside próximo a Zona Sul?'),'Variações equivalentes de acesso não foram agrupadas');
+assert(canonicalFormQuestionKey('Possui fácil acesso à Zona Sul?')!==canonicalFormQuestionKey('Reside próximo a Zona Sul?'),'Acesso fácil e proximidade voltaram a ser tratados como a mesma coisa');
+assert(canonicalFormQuestionKey('Quanto tempo leva até a Barra da Tijuca?')!==canonicalFormQuestionKey('Mora próximo à Barra da Tijuca?'),'Tempo de trajeto e proximidade voltaram a compartilhar resposta');
+assert(accessDestination('Quanto tempo leva aproximadamente no trajeto até a Barra da Tijuca?')==='Barra da Tijuca','Destino da pergunta de trajeto deixou de ser isolado');
+assert(accessDestination('Mora próximo ao Centro do Rio?')==='Centro','Destino Centro deixou de ser isolado');
 const semanticSaved={...inferredContactProfile,formAnswers:{'Possui fácil acesso à Zona Sul?':'Sim'}};
-assert(knownAnswer('Reside próximo a Zona Sul?',semanticSaved,{})==='Sim','Resposta confirmada equivalente não foi reaproveitada');
+assert(knownAnswer('Possui facil acesso a Zona Sul?',semanticSaved,{})==='Sim','Resposta confirmada equivalente de acesso não foi reaproveitada');
+assert(knownAnswer('Reside próximo a Zona Sul?',semanticSaved,{})!== 'Sim','Resposta de acesso vazou indevidamente para pergunta de proximidade');
+
+const reusableFacts={...inferredContactProfile,cnhCategory:'AB',uniformSize:'G',shoeSize:'40',transitCard:'RioCard e Jaé',schoolProof:'Certificado'};
+assert(knownAnswer('Você possui CNH categoria B válida?',reusableFacts,{})==='Sim','CNH confirmada no perfil não foi reutilizada');
+assert(/Uniforme\/roupa: G; calçado: 40/i.test(String(knownAnswer('INFORMAR NUMERO DO UNIFORME E TAMANHO DO CALÇADO',reusableFacts,{})||'')),'Tamanho de uniforme/calçado não foi reutilizado');
+assert(/RioCard e Jaé/i.test(String(knownAnswer('possui rio card e jae',reusableFacts,{})||'')),'Cartão de transporte confirmado não foi reutilizado');
+assert(knownAnswer('Você possui comprovante de escolaridade?',reusableFacts,{})==='Sim','Comprovante escolar confirmado não foi reutilizado');
+assert(canonicalFormQuestionKey('Faz uso de medicação? Se sim, qual?')==='medication','Pergunta de medicação deixou de ser agrupada');
+assert(canonicalFormQuestionKey('Possui alguma doença pré-existente? Se sim, qual?')==='health_condition','Pergunta de saúde deixou de ser agrupada');
 
 const syntheticRioAttachmentForm=`
 <input name="s" required value="">
@@ -174,6 +191,12 @@ const syntheticRioTextForm=`
 const parsedText=parseRioFormHtml(syntheticRioTextForm,'https://riovagas.com.br/enviar-curriculo-gratis/?vaga=88');
 assert(parsedText.schema.hasAttachment===false&&parsedText.schema.hasTextResume===true,'Formulário de currículo em texto não foi reconhecido');
 assert(parsedText.questions[0]?.controlTypes?.includes('textarea'),'Resposta em textarea deixou de ser reconhecida');
+
+const malformedAge={question:'Qual sua idade?',options:['Sim','Não']};
+assert(/dado textual/i.test(invalidQuestionShape(malformedAge)),'Formulário de idade com Sim/Não deixou de ser marcado inválido');
+const malformedNeighborhood={question:'Em qual bairro reside?',options:['Sim','Não']};
+assert(/dado textual/i.test(invalidQuestionShape(malformedNeighborhood)),'Formulário de bairro com Sim/Não deixou de ser marcado inválido');
+assert(!invalidQuestionShape({question:'Possui CNH categoria B?',options:['Sim','Não']}),'Pergunta válida de CNH foi marcada como formulário inválido');
 
 const syntheticRioUnknownRequired=`
 <form>

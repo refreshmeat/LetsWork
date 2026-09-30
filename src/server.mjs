@@ -60,14 +60,14 @@ function hydratedResumeProfile(resume,candidateId,supportDocuments=[]){
   const recovered=sourceText?inferProfile(sourceText):{};
   const candidate=db.prepare('SELECT name FROM candidates WHERE id=?').get(Number(candidateId))||{};
   const merged={...current};
-  for(const key of ['name','email','phone','address','neighborhood','residenceCity','residenceState','birthDate','age','cpf','cep']){
+  for(const key of ['name','email','phone','address','neighborhood','residenceCity','residenceState','birthDate','age','nationality','naturality','cpf','cep']){
     if(!String(merged[key]||'').trim()&&String(recovered?.[key]||'').trim())merged[key]=recovered[key];
   }
   if(!String(merged.name||'').trim()&&String(candidate.name||'').trim())merged.name=candidate.name;
   if(resume?.id){
     const persisted=parseJson(resume.profile_json,{});
     let changed=false;
-    for(const key of ['name','email','phone','address','neighborhood','residenceCity','residenceState','birthDate','age','cpf','cep']){
+    for(const key of ['name','email','phone','address','neighborhood','residenceCity','residenceState','birthDate','age','nationality','naturality','cpf','cep']){
       if(String(merged[key]||'')!==String(persisted[key]||'')){persisted[key]=merged[key]||'';changed=true;}
     }
     if(changed)db.prepare('UPDATE resumes SET profile_json=? WHERE id=?').run(json(persisted),resume.id);
@@ -101,7 +101,7 @@ function rebuildResumeFromDocuments(candidateId){
 === DOCUMENTO DE APOIO: ${x.original_name} ===
 ${x.extracted_text||''}`)].join('');
   const inferred=inferProfile(combined),old=parseJson(latest?.profile_json,{}),sticky={};
-  for(const k of ['name','email','phone','linkedin','portfolio','instagram','pcd','cpf','birthDate','age','cep','address','neighborhood','residenceCity','residenceState','additionalFacts','formAnswers']) if(old[k]!==undefined&&old[k]!==null&&old[k]!=='') sticky[k]=old[k];
+  for(const k of ['name','email','phone','linkedin','portfolio','instagram','pcd','cpf','birthDate','age','nationality','naturality','cep','address','neighborhood','residenceCity','residenceState','cnhCategory','uniformSize','shoeSize','transitCard','schoolProof','additionalFacts','formAnswers']) if(old[k]!==undefined&&old[k]!==null&&old[k]!=='') sticky[k]=old[k];
   const profile={...inferred,...sticky,candidateId,rawText:combined};
   if(latest){ if(latest.base_resume_path)try{fs.rmSync(latest.base_resume_path,{force:true});}catch{}; db.prepare('UPDATE resumes SET original_name=?,stored_path=?,extracted_text=?,profile_json=?,base_resume_path=NULL,base_resume_text=NULL,base_resume_focus=NULL,base_resume_updated_at=NULL WHERE id=?').run(primary.original_name,primary.stored_path,combined,json(profile),latest.id); }
   else db.prepare('INSERT INTO resumes(candidate_id,original_name,stored_path,extracted_text,profile_json) VALUES(?,?,?,?,?)').run(candidateId,primary.original_name,primary.stored_path,combined,json(profile));
@@ -119,6 +119,10 @@ function pendingFieldsForQuestion(question){
   if(key==='address')return ['address'];
   if(key==='phone')return ['phone'];
   if(key==='neighborhood')return ['neighborhood'];
+  if(key==='cnh')return ['cnhCategory'];
+  if(key==='uniform_shoe_size')return ['uniformSize','shoeSize'];
+  if(key==='transit_card')return ['transitCard'];
+  if(key==='school_proof')return ['schoolProof'];
   if(/linkedin/.test(q))return ['linkedin'];
   if(/instagram/.test(q))return ['instagram'];
   if(/portfolio|portifolio/.test(q))return ['portfolio'];
@@ -127,7 +131,9 @@ function pendingFieldsForQuestion(question){
 const pendingFieldLabels={
   cpf:'CPF',cep:'CEP',birthDate:'Data de nascimento',age:'Idade',
   address:'Endereço',phone:'Telefone / WhatsApp',neighborhood:'Bairro de residência',
-  residenceCity:'Cidade',residenceState:'Estado',linkedin:'LinkedIn',instagram:'Instagram',portfolio:'Portfólio'
+  residenceCity:'Cidade',residenceState:'Estado',linkedin:'LinkedIn',instagram:'Instagram',portfolio:'Portfólio',
+  cnhCategory:'CNH / categoria',uniformSize:'Tamanho de roupa/uniforme',shoeSize:'Número do calçado',
+  transitCard:'Cartão de transporte',schoolProof:'Comprovante de escolaridade'
 };
 function canonicalUrl(value){
   try{const u=new URL(value);u.hash='';for(const k of [...u.searchParams.keys()])if(/^utm_|^(ref|source|src|fbclid|gclid)$/i.test(k))u.searchParams.delete(k);return u.toString().replace(/\/$/,'');}
@@ -265,11 +271,11 @@ app.get('/api/candidate/:id/pending-data',(req,res)=>{
   const saved=profile.formAnswers&&typeof profile.formAnswers==='object'?profile.formAnswers:{};
   const rows=db.prepare(`SELECT a.job_id,a.error,j.title
     FROM applications a JOIN jobs j ON j.id=a.job_id
-    WHERE a.run_id=? AND a.status='NEEDS_DATA'
+    WHERE a.run_id=? AND a.status IN ('PROFILE_REQUIRED','NEEDS_DATA')
     ORDER BY a.job_id`).all(run.id);
   const unique=new Map();
   for(const row of rows){
-    const raw=String(row.error||'').replace(/^.*?Campos obrigat[^:]*:\s*/i,'').trim();
+    const raw=String(row.error||'').replace(/^.*?(?:Dados do perfil necess[aá]rios|Campos obrigat[^:]*|Resposta segura n[aã]o encontrada para):\s*/i,'').trim();
     for(const part of raw.split(/\s*\|\s*/)){
       const question=String(part||'').trim(); if(!question)continue;
       const key=canonicalFormQuestionKey(question)||normJobKey(question); if(!key)continue;
@@ -287,7 +293,7 @@ app.get('/api/candidate/:id/pending-data',(req,res)=>{
       for(const field of fields){
         if(String(profile[field]??'').trim())continue;
         missing=true;
-        if(!fieldMap.has(field))fieldMap.set(field,{field,label:pendingFieldLabels[field]||field,questions:[],jobs:[]});
+        if(!fieldMap.has(field))fieldMap.set(field,{field,label:pendingFieldLabels[field]||field,value:String(profile[field]??''),questions:[],jobs:[]});
         const rec=fieldMap.get(field);rec.questions.push(item.question);rec.jobs.push(...item.jobs);
       }
       if(missing)continue;
@@ -316,7 +322,7 @@ app.patch('/api/candidate/:id/pending-data',(req,res)=>{
     if(q&&v)nextAnswers[q]=v;
   }
   const fields=req.body?.fields&&typeof req.body.fields==='object'?req.body.fields:{};
-  const allowed=new Set(['cpf','cep','birthDate','age','address','phone','neighborhood','residenceCity','residenceState','linkedin','instagram','portfolio']);
+  const allowed=new Set(['cpf','cep','birthDate','age','address','phone','neighborhood','residenceCity','residenceState','linkedin','instagram','portfolio','cnhCategory','uniformSize','shoeSize','transitCard','schoolProof']);
   for(const [key,value] of Object.entries(fields))if(allowed.has(key))profile[key]=String(value??'').trim();
   profile.formAnswers=nextAnswers;
   db.prepare('UPDATE resumes SET profile_json=? WHERE id=?').run(json(profile),resume.id);
@@ -529,7 +535,7 @@ async function processRun(runId,onlyErrors=false){
 
   let jobs=getJobs(runId).filter(job=>/^RioVagas$/i.test(String(job?.source||''))&&/riovagas\.com\.br\/riovagas\//i.test(String(job?.url||'')));
   if(onlyErrors){
-    const ids=new Set(db.prepare("SELECT job_id FROM applications WHERE run_id=? AND status IN ('ERROR','NEEDS_DATA','PREPARING','READY')").all(runId).map(x=>x.job_id));
+    const ids=new Set(db.prepare("SELECT job_id FROM applications WHERE run_id=? AND status IN ('ERROR','PROFILE_REQUIRED','NEEDS_DATA','INVALID_FORM','PREPARING','READY')").all(runId).map(x=>x.job_id));
     const retryCandidates=jobs.filter(x=>ids.has(x.id)).map(x=>({...x,contractType:x.contract_type||'',publishedAt:x.published_at||''}));
     const eligible=prefilterJobsForAI(retryCandidates,profile,prefs);
     const eligibleIds=new Set(eligible.map(x=>x.id));
@@ -583,6 +589,7 @@ async function processRun(runId,onlyErrors=false){
     const applicationId=saveApplication(job,result.status,result.error||'');
     saveReceipt(applicationId,job,result.receipt);
     if(result.status==='CLOSED')db.prepare("UPDATE jobs SET sendable=0,blocked_reason='CLOSED',selected=0,batch_no=0 WHERE id=?").run(job.id);
+    if(result.status==='INVALID_FORM')db.prepare("UPDATE jobs SET sendable=0,blocked_reason='INVALID_FORM',selected=0,batch_no=0 WHERE id=?").run(job.id);
     updateHistory(job,result.status);
     updateCandidateMatchStatus(run.candidate_id,job.inventory_id,result.status,result.error||'',runId);
     recordRunEvent({runId,candidateId:run.candidate_id,type:eventType,data:{jobId:job.id,inventoryId:job.inventory_id,status:result.status,error:String(result.error||'').slice(0,240),receiptType:result.receipt?.confirmationType||'',preflight:result.preflight||null}});
@@ -638,6 +645,8 @@ async function processRun(runId,onlyErrors=false){
     total:preflightRows.length,
     ready:preflightRows.filter(x=>x.status==='READY').length,
     needsData:preflightRows.filter(x=>x.status==='NEEDS_DATA').length,
+    profileRequired:preflightRows.filter(x=>x.status==='PROFILE_REQUIRED').length,
+    invalidForm:preflightRows.filter(x=>x.status==='INVALID_FORM').length,
     closed:preflightRows.filter(x=>x.status==='CLOSED').length,
     errors:technicalErrors.length
   }});
@@ -675,7 +684,7 @@ async function processRun(runId,onlyErrors=false){
         recordRunEvent({runId,candidateId:run.candidate_id,type:'CANARY_OK',data:{jobId:job.id,status:result.status}});
         break;
       }
-      if(['CLOSED','NEEDS_DATA'].includes(result.status))continue;
+      if(['CLOSED','PROFILE_REQUIRED','NEEDS_DATA','INVALID_FORM'].includes(result.status))continue;
       db.prepare('UPDATE runs SET status=? WHERE id=?').run('ERROR_DISPATCH_PAUSED',runId);
       recordRunEvent({runId,candidateId:run.candidate_id,type:'CIRCUIT_BREAKER',data:{phase:'canary',jobId:job.id,status:result.status,reason:String(result.error||result.status).slice(0,400)}});
       return;

@@ -207,11 +207,18 @@ async function loadPendingData(expectedCandidateId=candidateId,selectionSeq=cand
   pendingQuestions=Array.isArray(d.custom)?d.custom:[];
   if(!d.total){panel.classList.add('hidden');$('pendingDataList').innerHTML='';return;}
   panel.classList.remove('hidden');
-  const fieldIds={cpf:'pCpf',cep:'pCep',birthDate:'pBirthDate',address:'pAddress',neighborhood:'pNeighborhood',linkedin:'pLinkedin',instagram:'pInstagram',portfolio:'pPortfolio'};
   const parts=[];
   for(const f of Array.isArray(d.requiredFields)?d.requiredFields:[]){
-    const inputId=fieldIds[f.field]||'';
-    parts.push(`<div class="span-2"><strong>${esc(f.label)}</strong><div class="sub">Preencha o campo ${esc(f.label)} nos dados acima. Ele resolve ${f.jobs?.length||f.questions?.length||1} candidatura(s).${inputId?` Campo: ${esc(inputId.replace(/^p/,''))}.`:''}</div></div>`);
+    const count=f.jobs?.length||f.questions?.length||1;
+    const placeholder={
+      cnhCategory:'Ex.: Não possuo, B, AB, D',
+      uniformSize:'Ex.: M, G, 42',
+      shoeSize:'Ex.: 39, 40, 41',
+      transitCard:'Ex.: Jaé, RioCard, ambos ou não possuo',
+      schoolProof:'Ex.: certificado, histórico, diploma ou não possuo',
+      birthDate:'DD/MM/AAAA'
+    }[f.field]||'Dado confirmado do candidato';
+    parts.push(`<label class="span-2">${esc(f.label)}<input data-pending-field="${esc(f.field)}" value="${esc(f.value||'')}" placeholder="${esc(placeholder)}"><span class="sub">Preencha uma vez. Resolve ${count} candidatura(s).</span></label>`);
   }
   pendingQuestions.forEach((x,idx)=>{
     parts.push(`<label class="span-2">${esc(x.question)}<input data-pending-index="${idx}" value="${esc(x.answer||'')}" placeholder="Resposta confirmada do candidato"></label>`);
@@ -228,11 +235,16 @@ async function savePendingData(){
     const idx=Number(el.dataset.pendingIndex),q=pendingQuestions[idx]?.question,v=el.value.trim();
     if(q&&v)answers[q]=v;
   });
-  const fields={
-    cpf:$('pCpf').value.trim(),cep:$('pCep').value.trim(),birthDate:$('pBirthDate').value.trim(),
+  const fields={};
+  document.querySelectorAll('[data-pending-field]').forEach(el=>{
+    const key=String(el.dataset.pendingField||'').trim(),value=el.value.trim();
+    if(key&&value)fields[key]=value;
+  });
+  Object.assign(fields,{
+    cpf:$('pCpf').value.trim(),cep:$('pCep').value.trim(),birthDate:$('pBirthDate').value.trim()||fields.birthDate||'',
     address:$('pAddress').value.trim(),neighborhood:$('pNeighborhood').value.trim(),
     linkedin:$('pLinkedin').value.trim(),instagram:$('pInstagram').value.trim(),portfolio:$('pPortfolio').value.trim()
-  };
+  });
   const r=await fetch(`/api/candidate/${candidateId}/pending-data`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({answers,fields})});
   const d=await r.json().catch(()=>({}));
   if(!r.ok){notice('pendingDataStatus',`Erro: ${d.error||'não foi possível salvar'}`);return;}
@@ -293,7 +305,9 @@ function statusBadge(status,error=''){
     ALREADY_APPLIED:['sent','JÁ CANDIDATADO'],
     READY:['ready','VALIDADA'],
     PREPARING:['processing','PREPARANDO'],
-    NEEDS_DATA:['wait','PRECISA DE DADO'],
+    PROFILE_REQUIRED:['wait','DADO DO PERFIL'],
+    NEEDS_DATA:['wait','DADO LEGADO'],
+    INVALID_FORM:['closed','FORMULÁRIO INVÁLIDO'],
     ERROR:['error','ERRO'],
     UNCERTAIN:['uncertain','NÃO CONFIRMADO'],
     CLOSED:['closed','VAGA ENCERRADA'],
@@ -325,8 +339,8 @@ function statusFilterMatch(status,filter){
 function updateRunSummary(counts={},total=0,runStatus=''){
   const c=counts||{},n=k=>Number(c[k]||0);
   const sent=n('SENT')+n('ALREADY_APPLIED');
-  const ready=n('READY'),needs=n('NEEDS_DATA'),errors=n('ERROR'),uncertain=n('UNCERTAIN'),closed=n('CLOSED');
-  const terminal=sent+ready+needs+errors+uncertain+closed+n('SKIPPED_INCOMPATIBLE')+n('SKIPPED_LOGIN');
+  const ready=n('READY'),profileRequired=n('PROFILE_REQUIRED'),needs=n('NEEDS_DATA'),invalidForm=n('INVALID_FORM'),errors=n('ERROR'),uncertain=n('UNCERTAIN'),closed=n('CLOSED');
+  const terminal=sent+ready+profileRequired+needs+invalidForm+errors+uncertain+closed+n('SKIPPED_INCOMPATIBLE')+n('SKIPPED_LOGIN');
   const pct=total?Math.min(100,Math.round(terminal/total*100)):0;
   const summary=$('runSummary');
   if(summary){
@@ -334,7 +348,8 @@ function updateRunSummary(counts={},total=0,runStatus=''){
       ['Processadas',total?`${terminal}/${total}`:String(terminal),''],
       ['Validadas',String(ready),'ready'],
       ['Enviadas',String(sent),'sent'],
-      ['Precisam de dado',String(needs),'wait'],
+      ['Dados do perfil',String(profileRequired+needs),'wait'],
+      ['Formulário inválido',String(invalidForm),'closed'],
       ['Erros',String(errors),'error'],
       ['Sem confirmação',String(uncertain),'uncertain']
     ];
@@ -353,10 +368,10 @@ function updateRunSummary(counts={},total=0,runStatus=''){
   $('uncertainWarning')?.classList.toggle('hidden',uncertain===0);
   if($('retryBtn')){
     const running=['APPLYING','RETRYING','PREFLIGHTING','CANARY'].includes(String(runStatus||'').toUpperCase());
-    $('retryBtn').disabled=running||(needs+errors===0);
+    $('retryBtn').disabled=running||(profileRequired+needs+invalidForm+errors===0);
     $('retryBtn').title=uncertain
-      ? 'Retenta somente erros e pendências com dados. Envios sem confirmação não são repetidos.'
-      : 'Retenta erros e pendências que já tenham os dados necessários.';
+      ? 'Retenta erros, dados de perfil já preenchidos e formulários revalidáveis. Envios sem confirmação não são repetidos.'
+      : 'Retenta erros e candidaturas cujo dado de perfil já tenha sido preenchido.';
   }
 }
 function syncSubmitModeHint(){
@@ -432,7 +447,7 @@ function renderJobs(jobs,statuses=currentStatuses){
       checked?'':'job-unselected',
       status==='UNCERTAIN'?'job-uncertain':'',
       status==='ERROR'?'job-error':'',
-      status==='NEEDS_DATA'?'job-needs-data':''
+      ['PROFILE_REQUIRED','NEEDS_DATA'].includes(status)?'job-needs-data':''
     ].filter(Boolean).join(' ');
     const badge=statusBadge(status,application.error||j.blocked_reason||'');
     return `<tr class="${rowClass}"><td class="select-col">${selectCell}</td>
@@ -618,8 +633,8 @@ async function pollStatus(){
   currentRunMode=d.mode==='live'?'live':'dry';
   const statusLabel={PREFLIGHTING:'Pré-validando formulários',CANARY:'Validando primeiro envio',APPLYING:'Enviando candidaturas',RETRYING:'Retentando candidaturas',ERROR_PREFLIGHT:'Pré-voo bloqueou o envio',ERROR_DISPATCH_PAUSED:'Envio pausado por segurança',DONE:'Concluído'}[String(d.status||'').toUpperCase()]||d.status||'Processando';
   $('statStatus').textContent=statusLabel;
-  const terminal=(c.SENT||0)+(c.ALREADY_APPLIED||0)+(c.READY||0)+(c.ERROR||0)+(c.NEEDS_DATA||0)+(c.UNCERTAIN||0)+(c.CLOSED||0)+(c.SKIPPED_INCOMPATIBLE||0);
-  notice('applyStatus',`Processadas: ${terminal}/${d.total||0} · Enviadas: ${c.SENT||0} · Validadas: ${c.READY||0} · Precisam de dado: ${c.NEEDS_DATA||0} · Erros: ${c.ERROR||0} · Sem confirmação: ${c.UNCERTAIN||0} · Encerradas: ${c.CLOSED||0}`);
+  const terminal=(c.SENT||0)+(c.ALREADY_APPLIED||0)+(c.READY||0)+(c.ERROR||0)+(c.PROFILE_REQUIRED||0)+(c.NEEDS_DATA||0)+(c.INVALID_FORM||0)+(c.UNCERTAIN||0)+(c.CLOSED||0)+(c.SKIPPED_INCOMPATIBLE||0);
+  notice('applyStatus',`Processadas: ${terminal}/${d.total||0} · Enviadas: ${c.SENT||0} · Validadas: ${c.READY||0} · Dados do perfil: ${(c.PROFILE_REQUIRED||0)+(c.NEEDS_DATA||0)} · Formulário inválido: ${c.INVALID_FORM||0} · Erros: ${c.ERROR||0} · Sem confirmação: ${c.UNCERTAIN||0} · Encerradas: ${c.CLOSED||0}`);
   updateRunSummary(c,Number(d.total||0),d.status);
   if(d.status==='DONE'||d.status==='CANCELLED'||String(d.status).startsWith('ERROR')){
     clearInterval(pollTimer);pollTimer=null;$('applyBtn').disabled=false;
@@ -644,8 +659,8 @@ async function startRun(endpoint){
   if(endpoint==='retry'){
     const retryLive=currentRunMode==='live';
     const msg=retryLive
-      ? 'Retentar erros e pendências deste lote em MODO REAL? Somente ERROR e NEEDS_DATA serão retomados. Envios sem confirmação NÃO serão repetidos.'
-      : 'Retentar erros e pendências desta simulação? Somente ERROR e NEEDS_DATA serão retomados. Envios sem confirmação NÃO serão repetidos.';
+      ? 'Retentar erros e pendências deste lote em MODO REAL? Erros, dados de perfil e formulários inválidos serão revalidados. Envios sem confirmação NÃO serão repetidos.'
+      : 'Retentar erros e pendências desta simulação? Erros, dados de perfil e formulários inválidos serão revalidados. Envios sem confirmação NÃO serão repetidos.';
     if(!window.confirm(msg))return;
     confirmLive=retryLive;
   }

@@ -100,6 +100,8 @@ export function runMetrics(runId){
     SUM(CASE WHEN status='ALREADY_APPLIED' THEN 1 ELSE 0 END) already_applied,
     SUM(CASE WHEN status='ERROR' THEN 1 ELSE 0 END) errors,
     SUM(CASE WHEN status='NEEDS_DATA' THEN 1 ELSE 0 END) needs_data,
+    SUM(CASE WHEN status='PROFILE_REQUIRED' THEN 1 ELSE 0 END) profile_required,
+    SUM(CASE WHEN status='INVALID_FORM' THEN 1 ELSE 0 END) invalid_form,
     SUM(CASE WHEN status='UNCERTAIN' THEN 1 ELSE 0 END) uncertain,
     SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) closed
     FROM applications WHERE run_id=?`).get(Number(runId))||{};

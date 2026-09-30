@@ -225,6 +225,8 @@ export function inferProfile(text){
   const cpf=(labeled(/^(?:cpf)\b/i)||clean.match(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/)?.[0]||'').trim();
   const cep=(labeled(/^(?:cep)\b/i)||clean.match(/\b\d{5}-?\d{3}\b/)?.[0]||'').trim();
   const birthDate=(labeled(/^(?:data de nascimento|nascimento)\b/i).match(/\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{4}\b/)?.[0]||'').trim();
+  const nationality=labeled(/^(?:nacionalidade)\b/i)||String(process.env.LETSWORK_DEFAULT_NATIONALITY||'Brasileira').trim();
+  const naturality=labeled(/^(?:naturalidade|cidade de nascimento|local de nascimento)\b/i);
   const age=(()=>{
     const head=lines.slice(0,12).join(' ');
     const m=head.match(/\b(?:idade\s*[:\-]?\s*)?(\d{2})\s*anos?\b/i);
@@ -251,5 +253,5 @@ export function inferProfile(text){
     if(m&&!/@|https?:|www\./i.test(line)){residenceCity=m[1].trim();residenceState=m[2].toUpperCase();break;}
   }
   return {name:guessName(raw),email,phone,linkedin,portfolio,instagram,skills,rawText:raw,
-    cpf,birthDate,age,cep,address,neighborhood,residenceCity,residenceState,additionalFacts:''};
+    cpf,birthDate,age,nationality,naturality,cep,address,neighborhood,residenceCity,residenceState,additionalFacts:''};
 }

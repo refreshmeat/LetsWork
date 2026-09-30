@@ -601,6 +601,17 @@ function titleLocation(title) {
   }
   return '';
 }
+function rioLocation(title,description){
+  const text=String(description||'');
+  const city=text.match(/\bCidade\s*:\s*([^;\n.]{2,80})/i)?.[1]?.trim()||'';
+  const neighborhood=text.match(/\bBairro\s*:\s*([^;\n.]{2,80})/i)?.[1]?.trim()||'';
+  if(city&&neighborhood)return neighborhood+' - '+city;
+  if(city)return city;
+  const fromTitle=titleLocation(title);
+  if(/^(?:sem experiencia|sem experi[eê]ncia|\d+\s*vagas?)$/i.test(fromTitle))return '';
+  return fromTitle;
+}
+
 function decodeHtml(value){
   return String(value||'')
     .replace(/<[^>]+>/g,' ')
@@ -647,7 +658,7 @@ async function searchRioVagasRecent(terms,filters,max=8000,{pageLimit=0}={}){
       const title=decodeHtml(row.title?.rendered||''),description=decodeHtml(row.content?.rendered||row.excerpt?.rendered||'');
       if(!title||!row.link)continue;
       out.set(row.link,{source:'RioVagas',title,url:row.link,description,company:'',salary:titleSalary(title),
-        location:titleLocation(title),publishedAt:row.date?row.date+'-03:00':'',externalId:String(row.id||''),loginFreeCandidate:true,broadCollection:true});
+        location:rioLocation(title,description),publishedAt:row.date?row.date+'-03:00':'',externalId:String(row.id||''),loginFreeCandidate:true,broadCollection:true});
       if(out.size>=max)break;
     }
   };
