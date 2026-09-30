@@ -1,74 +1,102 @@
-# Status atual do LetsWork
+# LetsWork v0.1.0 — versão fechada
 
-Atualizado em 29/09/2026.
+Fechada em 30/09/2026.
 
-## Escopo ativo
+## Produto
 
-- Única fonte de vagas: RioVagas.
-- Candidatura: HTTP direto.
-- Login de candidato: não necessário.
-- Automação de navegador: removida do projeto ativo.
-- Fontes antigas e adapters de browser: removidos do repositório.
-- Playwright: removido das dependências.
+A v0.1 está congelada como primeira versão distribuível do LetsWork.
+
+Fluxo principal:
+
+`currículo → extração factual → currículo-base → inventário RioVagas → ranking → pré-voo → envio HTTP → confirmação`
+
+## Fonte e inventário
+
+- Somente RioVagas.
+- SQLite global compartilhado entre candidatos.
+- Janela móvel de até 30 dias.
+- Reconciliação completa obrigatória em toda abertura.
+- A busca aguarda a sincronização inicial antes de usar o inventário.
+- Atualização incremental durante o uso.
+- Nova reconciliação completa após 24 horas de execução contínua.
+- Vagas removidas ou com mais de 30 dias ficam inativas e saem da busca sem destruir referências históricas.
+- Snapshot completo só pode desativar vagas quando todos os IDs esperados do WordPress foram lidos.
 
 ## Currículo
 
-- Currículo-base profissional gerado uma vez por versão dos documentos.
-- Modelos: Executivo, Clássico e Compacto.
-- Reutilização do mesmo PDF nas candidaturas.
-- Conteúdo factual apenas; IA não inventa experiência ou formação.
-- Portfólio não é unido automaticamente ao PDF.
+- Um currículo-base profissional por versão dos documentos.
+- Modelos Executivo, Clássico e Compacto.
+- PDF reutilizado nas candidaturas.
+- Conteúdo factual; sem invenção de experiência, formação ou credenciais.
+- PDF e DOCX são os formatos preferidos para distribuição a clientes.
 
-## Inventário
+## Ranking e formulários
 
-- SQLite global, independente do candidato.
-- Janela móvel máxima de 30 dias.
-- Filtros 7/15/30 locais.
-- Sincronização incremental e reconciliação completa periódica.
-- FTS5/BM25 para recuperação e priorização textual.
-- Identidade estável pelo `external_id` do RioVagas.
-- Vagas encerradas e antigas deixam o inventário ativo.
+- Regras determinísticas filtram incompatibilidades objetivas.
+- Ollama/llama3.2:3b revisa casos ambíguos.
+- Pré-voo obrigatório antes de qualquer envio real.
+- Variações atuais do formulário RioVagas suportadas.
+- Campos obrigatórios novos ou estrutura desconhecida bloqueiam o envio.
+- Dados deriváveis são extraídos/calculados antes de pedir informação humana.
+- Dados pessoais realmente ausentes são salvos uma vez no perfil e reutilizados.
+- Formulários incoerentes são INVALID_FORM, não pendência do candidato.
 
-## Candidatos
+## Envio e prova
 
-- Runs, jobs, histórico, candidaturas e recibos vinculados ao candidato.
-- Associação candidato-vaga em `candidate_job_matches`.
-- `candidate_job_pool` legado removido.
-- Histórico terminal impede reenvio da mesma vaga.
+- Envio direto HTTP, sem Playwright/Chromium.
+- SENT exige confirmação positiva e recibo persistido.
+- UNCERTAIN não é considerado sucesso e não é reenviado automaticamente.
+- Registros históricos antigos sem recibo foram reclassificados conservadoramente.
+- Circuit breaker pausa o lote em erro inesperado de envio.
 
-## Envio
+## Isolamento de candidatos
 
-- Revalidação do formulário imediatamente antes da candidatura.
-- Workers HTTP dedicados ao RioVagas.
-- `SENT` exige confirmação positiva.
-- `ALREADY_APPLIED` exige evidência correspondente.
-- POST sem confirmação segura vira `UNCERTAIN`.
-- Recibos persistidos em `application_receipts`.
-- Eventos persistidos em `run_events`.
+- Runs, jobs, aplicações, histórico e recibos são associados ao candidato correto.
+- Troca de candidato limpa imediatamente o resultado visual anterior.
+- Respostas assíncronas antigas não podem repintar vagas de outro candidato.
 
-## Backup
+## Interface
 
-- Backup portátil inclui SQLite e arquivos dos candidatos.
-- Sessões de navegador não são criadas nem exportadas.
-- Restauração é validada antes de ser aplicada na próxima inicialização.
-- O inventário de vagas é regenerável.
+- Localização mostra apenas bairro/cidade/estado.
+- Campos como benefícios, vale-transporte e horário não podem aparecer em Local.
+- Tipo de vaga usa checkboxes visíveis para CLT, PJ, Estágio, Temporário, Aprendiz e Freelancer.
+- É obrigatório selecionar ao menos um tipo de vaga.
 
-## Testes
+## Testes finais
 
-- `npm run check`: sintaxe dos módulos ativos.
-- `npm run smoke`: integridade básica e isolamento.
-- `npm run regression`: fonte única, 7/15/30, FTS, duplicidade, relações candidato-vaga e recibos.
-- `npm run regression:live`: formulário real do RioVagas via HTTP, sem candidatura.
-- Build Windows assinado com `CN=LetsWork Local Code Signing`.
+A versão fechada passa:
 
-## Benchmark validado
+- `npm run check`
+- `npm run regression`
+- `npm run smoke`
+- `git diff --check`
 
-No teste E2E do perfil Maria com janela de 7 dias:
+Regressões cobrem:
+- janela 7/15/30;
+- sincronização de abertura;
+- snapshot completo;
+- isolamento candidato/run;
+- vínculos de inventário;
+- recibos de envio;
+- SENT sem recibo = zero;
+- localização limpa;
+- formulário e dados de perfil;
+- troca de candidato no frontend.
 
-- aproximadamente 3 segundos;
-- 3.583 vagas lidas;
-- 3.571 após deduplicação;
-- 290 liberadas pelas regras;
-- 12 encaminhadas para revisão de IA.
+## Distribuição
 
-Os números do inventário variam ao longo do dia conforme o RioVagas publica ou encerra vagas.
+O pacote para outro computador não contém banco, currículo, documento ou histórico real.
+
+Requisitos:
+- Windows 10/11 x64;
+- internet;
+- Ollama + `llama3.2:3b` para revisão local completa;
+- aproximadamente 3 GB livres além do espaço normal do Windows/aplicativo.
+
+O instalador usa assinatura local Authenticode. Em computadores que não conhecem esse certificado, o Windows SmartScreen pode exibir aviso.
+
+## Git
+
+Branch oficial: `main`.
+
+Tag oficial desta versão: `v0.1.0`.

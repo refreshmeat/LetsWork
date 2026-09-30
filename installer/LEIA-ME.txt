@@ -1,0 +1,37 @@
+LETSWORK v0.1.0 - INSTALACAO EM OUTRO PC
+================================================
+
+REQUISITOS
+- Windows 10 ou 11, 64 bits.
+- Internet.
+- Aproximadamente 3 GB livres para o programa e a IA local.
+- Para curriculos antigos .DOC/.RTF/.ODT, Microsoft Word pode ser necessario.
+  Prefira PDF ou DOCX.
+
+INSTALACAO
+1. Execute "01 - Instalar LetsWork 0.1.0.exe".
+2. Se o Windows SmartScreen aparecer, use "Mais informacoes" > "Executar assim mesmo".
+   O instalador usa assinatura local da v0.1, nao um certificado comercial.
+3. Execute "02 - Preparar IA Local.cmd".
+   Na primeira vez ele instala o Ollama, se necessario, e baixa llama3.2:3b (~2 GB).
+4. Abra o LetsWork pelo atalho criado na Area de Trabalho.
+
+DADOS
+- Esta pasta NAO contem curriculos, documentos ou banco de candidatos.
+- Cada computador cria seus proprios dados em:
+  %USERPROFILE%\LetsWork\dados
+- O inventario de vagas do RioVagas e criado/sincronizado automaticamente na abertura.
+
+USO DA v0.1
+- Fonte de vagas: RioVagas.
+- O programa sincroniza o inventario ao abrir.
+- A candidatura real passa por pre-voo antes do envio.
+- SENT so e exibido quando existe confirmacao positiva persistida.
+
+SUPORTE
+Se a IA aparecer offline, execute novamente "02 - Preparar IA Local.cmd".
+Se o programa estiver aberto durante a preparacao da IA, feche e abra o LetsWork depois.
+
+VERSAO
+LetsWork 0.1.0
+Release oficial: v0.1.0
