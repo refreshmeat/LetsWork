@@ -24,13 +24,13 @@ Por padrão, cada instalação usa:
 
 `%USERPROFILE%\LetsWork\dados`
 
-O código e os instaladores não carregam currículos, bancos, documentos ou histórico de outros usuários.
+O código e o instalador não carregam currículos, bancos, documentos ou histórico de outros usuários. Em uma instalação nova, o SQLite nasce localmente e o inventário do RioVagas é preenchido pela própria máquina.
 
 ## IA local
 
-A v0.1 usa Ollama com o modelo `llama3.2:3b` para revisar casos ambíguos. As regras determinísticas continuam sendo a base do sistema.
+A v0.1 usa Ollama para revisar casos ambíguos. O instalador único do LetsWork baixa o instalador oficial do Ollama quando necessário, valida sua assinatura digital, instala silenciosamente e baixa o modelo local adequado ao hardware antes de concluir.
 
-Para uma instalação nova, execute o preparador de IA fornecido junto do instalador. Ele instala o Ollama quando possível e baixa o modelo necessário.
+Não existe etapa manual separada para instalar ou preparar o Ollama. As regras determinísticas continuam sendo a base do sistema.
 
 ## Formatos de currículo
 
@@ -57,7 +57,7 @@ Comandos de validação:
 - `npm run regression:live`
 - `npm run dist`
 
-O build oficial gera instalador NSIS e executável portátil para Windows x64.
+O build oficial gera um único instalador NSIS para Windows x64. `build/installer.nsh` chama `build/letswork-prereqs.ps1` durante a própria instalação para provisionar Ollama e o modelo sem exigir outra etapa do usuário.
 
 ## Estrutura ativa
 
@@ -71,6 +71,8 @@ O build oficial gera instalador NSIS e executável portátil para Windows x64.
 - `src/apply/answers.mjs`: respostas e inferências de formulário.
 - `src/services/inventory.mjs`: histórico, FTS e métricas.
 - `src/services/ai.mjs`: integração local com Ollama.
+- `build/installer.nsh`: extensão NSIS que provisiona a IA durante a instalação.
+- `build/letswork-prereqs.ps1`: download, validação e instalação do Ollama/modelo local.
 
 ## Segurança operacional
 
@@ -79,6 +81,7 @@ O build oficial gera instalador NSIS e executável portátil para Windows x64.
 - Um erro inesperado ou resposta sem confirmação aciona proteção contra reenvio.
 - Currículos e dados pessoais nunca devem ser versionados no Git.
 - O instalador distribuído não contém dados de candidatos.
+- O Ollama é obtido do endereço oficial e sua assinatura é validada antes da execução.
 
 ## Release
 
