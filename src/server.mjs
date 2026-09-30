@@ -15,6 +15,8 @@ import { optimizeBaseResume } from './services/tailor.mjs';
 import { terminalInventoryIds, upsertCandidateMatch, updateCandidateMatchStatus, recordRunEvent, runMetrics, sourceRegistry } from './services/inventory.mjs';
 import { createPortableBackup, preparePortableRestore } from './services/backup.mjs';
 import { applyRioVagasDirect, checkRioVagasHealth } from './apply/rio.mjs';
+import { applyJobbolDirect, checkJobbolHealth } from './apply/jobbol.mjs';
+import { maintainJobbolInventory, syncJobbolInventory, getJobbolInventoryStatus } from './services/jobbol.mjs';
 import { canonicalFormQuestionKey } from './apply/answers.mjs';
 import { runtime } from './runtime.mjs';
 import { storage, ensureCandidateDirs, candidateDir } from './storage.mjs';
@@ -42,6 +44,23 @@ function startRioStartupSync(){
     })
     .finally(()=>{rioStartupSyncing=false;});
   return rioStartupSyncPromise;
+}
+let jobbolStartupSyncPromise=null;
+let jobbolStartupSyncing=false;
+function startJobbolStartupSync(){
+  if(jobbolStartupSyncPromise)return jobbolStartupSyncPromise;
+  jobbolStartupSyncing=true;
+  jobbolStartupSyncPromise=syncJobbolInventory({full:true,force:true})
+    .then(status=>{
+      console.log(`[Jobbol] sincronizacao de abertura: ${status.active||0} internas ativas; ${status.fetched||0} detalhadas`);
+      return status;
+    })
+    .catch(e=>{
+      console.log('[Jobbol] sincronizacao de abertura falhou:',String(e?.message||e));
+      return {ok:false,error:String(e?.message||e)};
+    })
+    .finally(()=>{jobbolStartupSyncing=false;});
+  return jobbolStartupSyncPromise;
 }
 const generatedDir = runtime.generated;
 const upload = multer({ dest:uploadDir, limits:{fileSize:80*1024*1024} });
@@ -381,7 +400,7 @@ app.post('/api/search', async (req,res) => {
   if(searchInFlight) return res.status(409).json({error:'Uma busca já está em andamento. Aguarde a conclusão para iniciar outra.'});
   searchInFlight=true;
   try {
-    await startRioStartupSync();
+    await Promise.all([startRioStartupSync(),startJobbolStartupSync()]);
     const {resumeId,filters={},preview=false} = req.body || {};
     let resume = getResume(Number(resumeId));
     if (!resume) return res.status(400).json({error:'Currículo não encontrado'});
@@ -398,12 +417,11 @@ app.post('/api/search', async (req,res) => {
     }
     const recencyDays=[7,15,30].includes(Number(filters.recencyDays))?Number(filters.recencyDays):15;
     const effectiveFilters={...filters,candidateId:resume.candidate_id,nationwide:false,limit:500,recencyDays};
-    // Fase de validação do produto: toda busca/candidatura usa apenas RioVagas.
+    // Fontes validadas nesta fase: RioVagas e Jobbol, ambas com candidatura direta por HTTP.
     // A compatibilidade continua sendo derivada individualmente de cada currículo.
     effectiveFilters.publicSourcesOnly=true;
-    effectiveFilters.publicSourceKeys=['rio'];
+    effectiveFilters.publicSourceKeys=['rio','jobbol'];
     effectiveFilters.agenticBroadReview=true;
-    const rioOnly=effectiveFilters.publicSourcesOnly===true&&Array.isArray(effectiveFilters.publicSourceKeys)&&effectiveFilters.publicSourceKeys.length===1&&effectiveFilters.publicSourceKeys[0]==='rio';
     const priorRows=db.prepare('SELECT resume_id,filters_json FROM runs WHERE candidate_id=? AND resume_id=? ORDER BY id DESC LIMIT 8').all(resume.candidate_id,resume.id);
     for(const row of priorRows){
       const pf=parseJson(row.filters_json,{});
@@ -555,7 +573,9 @@ async function processRun(runId,onlyErrors=false){
   const prefs={...parseJson(run.filters_json,{}),candidateId:run.candidate_id};
   const dryRun=!prefs.autoSubmit;
 
-  let jobs=getJobs(runId).filter(job=>/^RioVagas$/i.test(String(job?.source||''))&&/riovagas\.com\.br\/riovagas\//i.test(String(job?.url||'')));
+  let jobs=getJobs(runId).filter(job=>{const src=String(job?.source||'');return /^RioVagas$/i.test(src)||/^Jobbol$/i.test(src);});
+  const applyDirect=(job,...args)=>/^Jobbol$/i.test(String(job?.source||''))?applyJobbolDirect(job,...args):applyRioVagasDirect(job,...args);
+  const healthDirect=job=>/^Jobbol$/i.test(String(job?.source||''))?checkJobbolHealth(job):checkRioVagasHealth(job);
   if(onlyErrors){
     const ids=new Set(db.prepare("SELECT job_id FROM applications WHERE run_id=? AND status IN ('ERROR','PROFILE_REQUIRED','NEEDS_DATA','INVALID_FORM','PREPARING','READY')").all(runId).map(x=>x.job_id));
     const retryCandidates=jobs.filter(x=>ids.has(x.id)).map(x=>({...x,contractType:x.contract_type||'',publishedAt:x.published_at||''}));
@@ -580,7 +600,7 @@ async function processRun(runId,onlyErrors=false){
     if(!applicationId||!receipt)return;
     db.prepare(`INSERT INTO application_receipts
       (application_id,candidate_id,inventory_id,provider,provider_job_id,confirmation_type,http_status,response_url,response_hash,confirmation_text)
-      VALUES(?,?,?,?,?,?,?,?,?,?)`).run(applicationId,run.candidate_id,Number(job.inventory_id)||null,receipt.provider||'RioVagas',receipt.providerJobId||'',receipt.confirmationType||'UNKNOWN',receipt.httpStatus??null,receipt.responseUrl||'',receipt.responseHash||'',receipt.confirmationText||'');
+      VALUES(?,?,?,?,?,?,?,?,?,?)`).run(applicationId,run.candidate_id,Number(job.inventory_id)||null,receipt.provider||job.source||'RioVagas',receipt.providerJobId||'',receipt.confirmationType||'UNKNOWN',receipt.httpStatus??null,receipt.responseUrl||'',receipt.responseHash||'',receipt.confirmationText||'');
   };
   const updateHistory=(job,status)=>{
     if(!job.source_key)return;
@@ -612,6 +632,7 @@ async function processRun(runId,onlyErrors=false){
     saveReceipt(applicationId,job,result.receipt);
     if(result.status==='CLOSED')db.prepare("UPDATE jobs SET sendable=0,blocked_reason='CLOSED',selected=0,batch_no=0 WHERE id=?").run(job.id);
     if(result.status==='INVALID_FORM')db.prepare("UPDATE jobs SET sendable=0,blocked_reason='INVALID_FORM',selected=0,batch_no=0 WHERE id=?").run(job.id);
+    if(result.status==='LOGIN_REQUIRED')db.prepare("UPDATE jobs SET sendable=0,blocked_reason='LOGIN_REQUIRED',selected=0,batch_no=0 WHERE id=?").run(job.id);
     updateHistory(job,result.status);
     updateCandidateMatchStatus(run.candidate_id,job.inventory_id,result.status,result.error||'',runId);
     recordRunEvent({runId,candidateId:run.candidate_id,type:eventType,data:{jobId:job.id,inventoryId:job.inventory_id,status:result.status,error:String(result.error||'').slice(0,240),receiptType:result.receipt?.confirmationType||'',preflight:result.preflight||null}});
@@ -619,11 +640,14 @@ async function processRun(runId,onlyErrors=false){
   };
 
   if(jobs.length){
-    const health=await checkRioVagasHealth(jobs[0]);
-    if(!health.ok){
-      db.prepare('UPDATE runs SET status=? WHERE id=?').run('ERROR_SOURCE_UNAVAILABLE',runId);
-      recordRunEvent({runId,candidateId:run.candidate_id,type:'SOURCE_UNAVAILABLE',data:{error:health.error}});
-      return;
+    const firstBySource=[...new Map(jobs.map(j=>[String(j.source||''),j])).values()];
+    for(const sourceJob of firstBySource){
+      const health=await healthDirect(sourceJob);
+      if(!health.ok){
+        db.prepare('UPDATE runs SET status=? WHERE id=?').run('ERROR_SOURCE_UNAVAILABLE',runId);
+        recordRunEvent({runId,candidateId:run.candidate_id,type:'SOURCE_UNAVAILABLE',data:{source:sourceJob.source,error:health.error}});
+        return;
+      }
     }
   }
 
@@ -648,7 +672,7 @@ async function processRun(runId,onlyErrors=false){
       if(['SENT','ALREADY_APPLIED','UNCERTAIN','CLOSED'].includes(old?.status))continue;
       try{
         saveApplication(job,'PREPARING','Pré-validando formulário');
-        const result=await applyRioVagasDirect(job,applicationResume,profile,prefs,{dryRun:true});
+        const result=await applyDirect(job,applicationResume,profile,prefs,{dryRun:true});
         markResult(job,result,'PREFLIGHT_RESULT');
       }catch(e){
         const message=String(e?.message||e).slice(0,500);
@@ -699,7 +723,7 @@ async function processRun(runId,onlyErrors=false){
     const job=readyJobs[i];
     try{
       saveApplication(job,'PREPARING','Pré-voo aprovado; executando envio-canário');
-      const result=await applyRioVagasDirect(job,applicationResume,profile,prefs,{dryRun:false});
+      const result=await applyDirect(job,applicationResume,profile,prefs,{dryRun:false});
       markResult(job,result,'CANARY_RESULT');
       if(['SENT','ALREADY_APPLIED'].includes(result.status)){
         canarySucceeded=true;canaryIndex=i;
@@ -739,7 +763,7 @@ async function processRun(runId,onlyErrors=false){
       if(['SENT','ALREADY_APPLIED','UNCERTAIN','CLOSED'].includes(old?.status))continue;
       try{
         saveApplication(job,'PREPARING','Pré-voo aprovado; enviando');
-        const result=await applyRioVagasDirect(job,applicationResume,profile,prefs,{dryRun:false});
+        const result=await applyDirect(job,applicationResume,profile,prefs,{dryRun:false});
         markResult(job,result,'APPLICATION_RESULT');
         if(['ERROR','UNCERTAIN'].includes(result.status)){
           abortDispatch=true;
@@ -977,7 +1001,7 @@ app.post('/api/backup/import',upload.single('backup'),(req,res)=>{
 app.get('/api/system/status',(req,res)=>{
   try{
     const dbFile=path.join(storage.data,'letswork.sqlite');
-    res.json({inventory:{...getRioVagasInventoryStatus(),startupSyncing:rioStartupSyncing},sources:sourceRegistry(),database:{path:dbFile,bytes:fs.existsSync(dbFile)?fs.statSync(dbFile).size:0}});
+    res.json({inventory:{rio:{...getRioVagasInventoryStatus(),startupSyncing:rioStartupSyncing},jobbol:{...getJobbolInventoryStatus(),startupSyncing:jobbolStartupSyncing}},sources:sourceRegistry(),database:{path:dbFile,bytes:fs.existsSync(dbFile)?fs.statSync(dbFile).size:0}});
   }catch(e){res.status(500).json({error:String(e?.message||e)});}
 });
 
@@ -1000,16 +1024,28 @@ async function runRioInventoryMaintenance(){
     console.log('[RioVagas] manutencao automatica falhou:',String(e?.message||e));
   }
 }
+async function runJobbolInventoryMaintenance(){
+  try{
+    const status=await maintainJobbolInventory();
+    console.log(`[Jobbol] manutencao automatica: ${status.active||0} vagas internas ativas`);
+  }catch(e){
+    console.log('[Jobbol] manutencao automatica falhou:',String(e?.message||e));
+  }
+}
 
 app.get('/api/inventory/riovagas/status',(req,res)=>{
   try{res.json(getRioVagasInventoryStatus());}catch(e){res.status(500).json({error:String(e?.message||e)});}
+});
+app.get('/api/inventory/jobbol/status',(req,res)=>{
+  try{res.json(getJobbolInventoryStatus());}catch(e){res.status(500).json({error:String(e?.message||e)});}
 });
 
 app.listen(PORT,'127.0.0.1',()=>{
   console.log(`LetsWork: http://127.0.0.1:${PORT}`);
   console.log(`PASTA DESTA EXECUÇÃO: ${runtime.session}`);
-  setImmediate(()=>{startRioStartupSync();});
-  const timer=setInterval(runRioInventoryMaintenance,60*60*1000); timer.unref?.();
+  setImmediate(()=>{startRioStartupSync();startJobbolStartupSync();});
+  const rioTimer=setInterval(runRioInventoryMaintenance,60*60*1000); rioTimer.unref?.();
+  const jobbolTimer=setInterval(runJobbolInventoryMaintenance,60*60*1000); jobbolTimer.unref?.();
 });
 
 app.get('/api/run/:id/applications',(req,res)=>{

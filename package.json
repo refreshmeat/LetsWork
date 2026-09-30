@@ -7,7 +7,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/services/ai.mjs && node --check src/services/jobs.mjs && node --check src/services/inventory.mjs && node --check src/services/backup.mjs && node --check src/services/ranking.mjs && node --check src/services/tailor.mjs && node --check src/apply/answers.mjs && node --check src/apply/rio.mjs && node --check public/app.js && node --check desktop/restore.cjs && node --check desktop/main.cjs",
+    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/services/ai.mjs && node --check src/services/jobs.mjs && node --check src/services/jobbol.mjs && node --check src/services/inventory.mjs && node --check src/services/backup.mjs && node --check src/services/ranking.mjs && node --check src/services/tailor.mjs && node --check src/apply/answers.mjs && node --check src/apply/rio.mjs && node --check src/apply/jobbol.mjs && node --check public/app.js && node --check desktop/restore.cjs && node --check desktop/main.cjs",
     "server": "node src/server.mjs",
     "dist": "electron-builder --win nsis",
     "dist:portable": "electron-builder --win portable",

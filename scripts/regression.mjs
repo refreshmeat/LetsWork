@@ -17,12 +17,13 @@ function scalar(sql,...args){
 
 const sources=sourceRegistry();
 const enabled=sources.filter(x=>Number(x.enabled)===1);
-assert(enabled.length===1&&enabled[0].source_key==='rio','Somente RioVagas pode estar habilitado');
-assert(enabled[0].apply_mode==='DIRECT_HTTP'&&Number(enabled[0].login_required)===0,'RioVagas deve ser DIRECT_HTTP e sem login');
+const enabledKeys=new Set(enabled.map(x=>x.source_key));
+assert(enabledKeys.has('rio')&&enabledKeys.has('jobbol')&&enabled.length===2,'RioVagas e Jobbol devem ser as fontes habilitadas');
+assert(enabled.every(x=>x.apply_mode==='DIRECT_HTTP'&&Number(x.login_required)===0),'Fontes habilitadas devem usar DIRECT_HTTP e nao exigir login previo');
 
 const inventoryCount=scalar("SELECT COUNT(*) n FROM job_inventory WHERE source='RioVagas' AND active=1");
 assert(inventoryCount>0,'Inventário RioVagas está vazio');
-assert(scalar("SELECT COUNT(*) n FROM job_inventory WHERE active=1 AND source<>'RioVagas'")===0,'Há fonte ativa diferente de RioVagas no inventário');
+assert(scalar("SELECT COUNT(*) n FROM job_inventory WHERE active=1 AND source NOT IN ('RioVagas','Jobbol')")===0,'Ha fonte ativa nao suportada no inventario');
 assert(scalar("SELECT COUNT(*) n FROM job_inventory WHERE source='RioVagas' AND active=1 AND url NOT LIKE '%riovagas.com.br/riovagas/%'")===0,'Inventário ativo contém URL que não é vaga direta RioVagas');
 assert(scalar("SELECT COUNT(*) n FROM job_inventory WHERE source='RioVagas' AND active=1 AND datetime(published_at)<datetime('now','-30 days')")===0,'Há vaga ativa com mais de 30 dias');
 assert(scalar("SELECT COUNT(*) n FROM job_inventory WHERE source='RioVagas' AND active=1 AND (lower(location) LIKE '%benef%' OR lower(location) LIKE '%vale-transporte%' OR lower(location) LIKE '%horario%')")===0,'Local ativo ainda contém Benefícios/Vale-transporte/Horário');
@@ -264,7 +265,7 @@ assert(parsedUnknown.schema.unsupportedRequired.includes('campo_novo_do_rio'),'C
 const serverRuntimeText=fs.readFileSync(path.resolve('src/server.mjs'),'utf8');
 assert(serverRuntimeText.includes('PREFLIGHTING')&&serverRuntimeText.includes('ERROR_PREFLIGHT'),'Pré-voo obrigatório saiu do pipeline real');
 assert(serverRuntimeText.includes('CIRCUIT_BREAKER')&&serverRuntimeText.includes('ERROR_DISPATCH_PAUSED'),'Circuit breaker do envio real saiu do pipeline');
-assert(serverRuntimeText.includes('checkRioVagasHealth')&&serverRuntimeText.includes('ERROR_SOURCE_UNAVAILABLE'),'Proteção contra indisponibilidade do RioVagas saiu do pipeline');
+assert(serverRuntimeText.includes('checkRioVagasHealth')&&serverRuntimeText.includes('checkJobbolHealth')&&serverRuntimeText.includes('ERROR_SOURCE_UNAVAILABLE'),'Protecao contra indisponibilidade das fontes saiu do pipeline');
 
 
 const jobsRuntimeText=fs.readFileSync(path.resolve('src/services/jobs.mjs'),'utf8');
@@ -273,12 +274,12 @@ assert(jobsRuntimeText.includes('seenIds.size===expectedTotal'),'Reconciliação
 assert(jobsRuntimeText.includes("fullSnapshot=!incremental&&rows._syncComplete===true"),'Limpeza destrutiva voltou a aceitar snapshot incompleto');
 const serverStartupText=fs.readFileSync(path.resolve('src/server.mjs'),'utf8');
 assert(serverStartupText.includes("syncRioVagasInventory({full:true,force:true})"),'Abertura do LetsWork deixou de forçar reconciliação completa');
-assert(serverStartupText.includes('await startRioStartupSync()'),'Busca voltou a poder começar antes da sincronização inicial');
-assert(serverStartupText.includes('setInterval(runRioInventoryMaintenance,60*60*1000)'),'Manutenção periódica do inventário deixou de existir');
+assert(serverStartupText.includes('await Promise.all([startRioStartupSync(),startJobbolStartupSync()])'),'Busca deve aguardar sincronizacao inicial das fontes');
+assert(serverStartupText.includes('setInterval(runRioInventoryMaintenance,60*60*1000)')&&serverStartupText.includes('setInterval(runJobbolInventoryMaintenance,60*60*1000)'),'Manutencao periodica das fontes deve existir');
 
 console.log(JSON.stringify({
   ok:true,
-  source:enabled[0].name,
+  sources:enabled.map(x=>x.name),
   inventoryCount,
   windows:counts,
   ftsHits,

@@ -3,7 +3,8 @@ import path from 'path';
 import { createHash } from 'node:crypto';
 import { storage } from '../storage.mjs';
 import { db } from '../db.mjs';
-import { queryRioInventory } from './inventory.mjs';
+import { queryRioInventory, queryInventorySources } from './inventory.mjs';
+import { syncJobbolInventory, getJobbolInventoryStatus } from './jobbol.mjs';
 import { askAI, parseJsonLoose } from './ai.mjs';
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -830,6 +831,19 @@ async function cachedRioVagasSource(terms,filters,max=25000){
   return rows;
 }
 
+async function cachedJobbolSource(terms,filters,max=25000){
+  const requestedDays=[7,15,30].includes(Number(filters.recencyDays))?Number(filters.recencyDays):15;
+  let st=getJobbolInventoryStatus();
+  const ageMs=Date.now()-Date.parse(String(st.last_sync_at||''));
+  if(Number(st.coverage_days||0)<30||st.fullSyncDue||!Number.isFinite(ageMs)){
+    st=await syncJobbolInventory({full:true,force:true});
+    console.log(`[busca] Jobbol: inventario sincronizado com ${st.active||0} vagas internas ativas`);
+  }
+  const rows=queryInventorySources(['Jobbol'],requestedDays,terms,max);
+  console.log(`[busca] Jobbol: ${rows.length} vagas no filtro de ${requestedDays} dias`);
+  return rows;
+}
+
 function canonicalJobUrl(value){
   try{
     const u=new URL(value);u.hash='';
@@ -870,6 +884,10 @@ export async function searchJobs(profile, filters, suppliedTerms=null) {
   console.log('[busca] termos:',terms.slice(0,18));
   if(!terms.length) throw new Error('Não foi possível inferir uma área; use o filtro opcional de área.');
   const poolCap=Math.min(25000,Math.max(5000,Number(filters.poolLimit||15000)));
-  const rioFilters={...filters,publicSourcesOnly:true,publicSourceKeys:['rio'],nationwide:false};
-  return cachedRioVagasSource(terms,rioFilters,poolCap);
+  const sourceFilters={...filters,publicSourcesOnly:true,publicSourceKeys:['rio','jobbol'],nationwide:false};
+  const [rio,jobbol]=await Promise.all([
+    cachedRioVagasSource(terms,{...sourceFilters,publicSourceKeys:['rio']},poolCap),
+    cachedJobbolSource(terms,{...sourceFilters,publicSourceKeys:['jobbol']},poolCap)
+  ]);
+  return [...rio,...jobbol].slice(0,poolCap);
 }

@@ -21,14 +21,17 @@ function ftsQuery(terms=[]){
   return tokens.map(x=>x.replace(/"/g,'')+'*').join(' OR ');
 }
 
-export function queryRioInventory(days=15,terms=[],limit=25000){
+export function queryInventorySources(sources=['RioVagas'],days=15,terms=[],limit=25000){
   const cutoff=cutoffIso(days),requested=Math.max(1,Number(limit)||25000);
+  const safeSources=[...new Set((Array.isArray(sources)?sources:[sources]).map(String).filter(Boolean))];
+  if(!safeSources.length)return [];
+  const ph=safeSources.map(()=>'?').join(',');
   const all=db.prepare(`SELECT id AS inventoryId,source,title,company,salary,location,url,description,
     contract_type AS contractType,published_at AS publishedAt,external_id AS externalId,
     1 AS loginFreeCandidate,1 AS broadCollection
     FROM job_inventory
-    WHERE source='RioVagas' AND active=1 AND datetime(published_at)>=datetime(?)
-    ORDER BY datetime(published_at) DESC LIMIT 25000`).all(cutoff);
+    WHERE source IN (${ph}) AND active=1 AND datetime(published_at)>=datetime(?)
+    ORDER BY datetime(published_at) DESC LIMIT 25000`).all(...safeSources,cutoff);
   const query=ftsQuery(terms);
   if(!query||!all.length)return all.slice(0,requested);
   try{
@@ -36,8 +39,8 @@ export function queryRioInventory(days=15,terms=[],limit=25000){
       FROM job_inventory_fts
       JOIN job_inventory ji ON ji.id=job_inventory_fts.rowid
       WHERE job_inventory_fts MATCH ?
-        AND ji.source='RioVagas' AND ji.active=1 AND datetime(ji.published_at)>=datetime(?)
-      ORDER BY rank LIMIT ?`).all(query,cutoff,Math.min(all.length,12000));
+        AND ji.source IN (${ph}) AND ji.active=1 AND datetime(ji.published_at)>=datetime(?)
+      ORDER BY rank LIMIT ?`).all(query,...safeSources,cutoff,Math.min(all.length,12000));
     const order=new Map(ranked.map((x,i)=>[Number(x.id),{i,rank:Number(x.rank)}]));
     all.sort((a,b)=>{
       const ar=order.get(Number(a.inventoryId)),br=order.get(Number(b.inventoryId));
@@ -56,6 +59,9 @@ export function queryRioInventory(days=15,terms=[],limit=25000){
   return all.slice(0,requested);
 }
 
+export function queryRioInventory(days=15,terms=[],limit=25000){
+  return queryInventorySources(['RioVagas'],days,terms,limit);
+}
 export function terminalInventoryIds(candidateId){
   return new Set(db.prepare(`SELECT inventory_id
     FROM candidate_job_matches

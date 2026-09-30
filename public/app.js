@@ -42,8 +42,10 @@ document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>acti
 async function loadSystemStatus(){
   try{
     const r=await fetch('/api/system/status'),d=await r.json();
-    const inv=d.inventory||{},active=Number(inv.active||0),last=inv.last_sync_at?dateBR(inv.last_sync_at):'';
-    if($('inventoryLabel'))$('inventoryLabel').textContent=`RioVagas · ${active.toLocaleString('pt-BR')} vagas`;
+    const inv=d.inventory||{},rio=inv.rio||{},jobbol=inv.jobbol||{};
+    const active=Number(rio.active||0)+Number(jobbol.active||0);
+    const latest=[rio.last_sync_at,jobbol.last_sync_at].filter(Boolean).sort().at(-1),last=latest?dateBR(latest):'';
+    if($('inventoryLabel'))$('inventoryLabel').textContent=`RioVagas + Jobbol · ${active.toLocaleString('pt-BR')} vagas`;
     if($('inventoryMeta'))$('inventoryMeta').textContent=`até 30 dias${last?` · atualizado ${last}`:''}`;
   }catch{
     if($('inventoryMeta'))$('inventoryMeta').textContent='Inventário local indisponível';
@@ -521,7 +523,7 @@ async function loadRun(id,expectedCandidateId=candidateId,selectionSeq=candidate
   $('statJobs').textContent=currentJobs.length; $('statStatus').textContent=status.status||'Pronto';
   renderJobs(currentJobs,currentStatuses); renderBatchControl(status); updateRunSummary(status.counts||{},Number(status.total||0),status.status);
   $('resultsCard').classList.toggle('hidden',!currentJobs.length);
-  $('resultMeta').textContent=currentJobs.length?`Lote ${status.activeBatch||1}/${status.batches||1}: ${currentJobs.filter(isJobSelectable).length} vagas neste lote · ${status.alreadySentTotal||0} já processadas anteriormente · ${status.sendableTotal||0} automatizáveis via RioVagas HTTP · ${status.reserve||0} em outros lotes.`:'';
+  $('resultMeta').textContent=currentJobs.length?`Lote ${status.activeBatch||1}/${status.batches||1}: ${currentJobs.filter(isJobSelectable).length} vagas neste lote · ${status.alreadySentTotal||0} já processadas anteriormente · ${status.sendableTotal||0} automatizáveis via HTTP direto · ${status.reserve||0} em outros lotes.`:'';
   $('xlsxBtn').href=`/api/run/${id}/export.xlsx`; $('csvBtn').href=`/api/run/${id}/export.csv`;
 }
 function filters(){
@@ -641,8 +643,8 @@ $('searchBtn').addEventListener('click',async()=>{
   }
   $('searchBtn').disabled=true; $('statStatus').textContent='Buscando';
   const searchStarted=Date.now();
-  notice('searchStatus','Buscando no RioVagas... 0s');
-  clearInterval(searchElapsedTimer); searchElapsedTimer=setInterval(()=>{const sec=Math.floor((Date.now()-searchStarted)/1000);notice('searchStatus',`Buscando no RioVagas... ${sec}s`);},1000);
+  notice('searchStatus','Buscando no RioVagas + Jobbol... 0s');
+  clearInterval(searchElapsedTimer); searchElapsedTimer=setInterval(()=>{const sec=Math.floor((Date.now()-searchStarted)/1000);notice('searchStatus',`Buscando no RioVagas + Jobbol... ${sec}s`);},1000);
   try{
     await saveProfile();
     if(searchSelectionSeq!==candidateSelectionSeq||Number(candidateId)!==searchCandidateId||Number(resumeId)!==searchResumeId)return;
@@ -654,7 +656,7 @@ $('searchBtn').addEventListener('click',async()=>{
     manuallyDeselectedJobIds=new Set();
     currentStatuses=new Map(); $('statJobs').textContent=currentJobs.length; $('statStatus').textContent='Busca concluída';
     renderJobs(currentJobs,currentStatuses); $('resultsCard').classList.remove('hidden');
-    $('resultMeta').textContent=`${d.compatible} novas no lote 1 · ${d.alreadySentTotal||0} já processadas anteriormente · ${d.sendableTotal||0} automatizáveis via RioVagas HTTP · ${d.reserve||0} em outros lotes · ${d.aiReviewPending||0} em revisão da IA · ${d.recent??d.found} vagas recentes consultadas.`;
+    $('resultMeta').textContent=`${d.compatible} novas no lote 1 · ${d.alreadySentTotal||0} já processadas anteriormente · ${d.sendableTotal||0} automatizáveis via HTTP direto · ${d.reserve||0} em outros lotes · ${d.aiReviewPending||0} em revisão da IA · ${d.recent??d.found} vagas recentes consultadas.`;
     renderBatchControl({batches:d.batches||1,activeBatch:1});
     $('xlsxBtn').href=`/api/run/${runId}/export.xlsx`; $('csvBtn').href=`/api/run/${runId}/export.csv`;
     notice('searchStatus',d.aiReviewPending>0?`${d.compatible} vagas já prontas. ${d.aiReviewPending} vagas ambíguas continuam em análise.`:`${d.compatible} vagas prontas neste lote.`);

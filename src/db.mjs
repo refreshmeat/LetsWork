@@ -260,7 +260,12 @@ try{
   }
 }catch{}
 db.prepare(`INSERT INTO source_registry(source_key,name,enabled,discovery_mode,apply_mode,login_required,status,notes,updated_at)
-  VALUES('rio','RioVagas',1,'HTTP_JSON','DIRECT_HTTP',0,'VALIDATED','Única fonte ativa nesta fase',CURRENT_TIMESTAMP)
+  VALUES('rio','RioVagas',1,'HTTP_JSON','DIRECT_HTTP',0,'VALIDATED','Fonte direta via HTTP',CURRENT_TIMESTAMP)
+  ON CONFLICT(source_key) DO UPDATE SET name=excluded.name,enabled=1,discovery_mode=excluded.discovery_mode,
+    apply_mode=excluded.apply_mode,login_required=0,status='VALIDATED',notes=excluded.notes,updated_at=CURRENT_TIMESTAMP`).run();
+
+db.prepare(`INSERT INTO source_registry(source_key,name,enabled,discovery_mode,apply_mode,login_required,status,notes,updated_at)
+  VALUES('jobbol','Jobbol',1,'HTTP_JSON','DIRECT_HTTP',0,'VALIDATED','Somente vagas internas Jobbol; parceiros externos descartados; candidatura via curl/HTTP',CURRENT_TIMESTAMP)
   ON CONFLICT(source_key) DO UPDATE SET name=excluded.name,enabled=1,discovery_mode=excluded.discovery_mode,
     apply_mode=excluded.apply_mode,login_required=0,status='VALIDATED',notes=excluded.notes,updated_at=CURRENT_TIMESTAMP`).run();
 

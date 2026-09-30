@@ -11,7 +11,7 @@ function addFolderFiltered(zip,root,zipRoot){
   if(!fs.existsSync(root))return;
   const walk=(dir,rel='')=>{
     for(const entry of fs.readdirSync(dir,{withFileTypes:true})){
-      if(entry.name==='sessoes_navegador')continue;
+      if(entry.name==='sessoes_navegador'||entry.name==='jobbol-session.cookies')continue;
       const full=path.join(dir,entry.name),nextRel=rel?rel+'/'+entry.name:entry.name;
       if(entry.isDirectory())walk(full,nextRel);
       else zip.addLocalFile(full,zipRoot+'/'+path.posix.dirname(nextRel),path.basename(entry.name));
@@ -27,7 +27,7 @@ export function createPortableBackup(){
   const stamp=new Date().toISOString().replace(/[:.]/g,'-');
   const file=path.join(storage.backups,`LetsWork-backup-${stamp}.zip`);
   const zip=new AdmZip();
-  const manifest={format:'letswork-backup',version:3,createdAt:new Date().toISOString(),includes:['database','candidates'],excluded:['browser_sessions','live_inventory_cache'],inventoryCanRefresh:true,portablePaths:true};
+  const manifest={format:'letswork-backup',version:3,createdAt:new Date().toISOString(),includes:['database','candidates'],excluded:['browser_sessions','jobbol_session_cookies','live_inventory_cache'],inventoryCanRefresh:true,portablePaths:true};
   zip.addFile('letswork-backup.json',Buffer.from(JSON.stringify(manifest,null,2),'utf8'));
   const dbFile=path.join(storage.data,'letswork.sqlite');
   if(!fs.existsSync(dbFile))throw new Error('Banco local não encontrado');
