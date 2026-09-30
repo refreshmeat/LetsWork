@@ -53,6 +53,27 @@ const getBatchJobs = id => {
 const getAllJobs = id => db.prepare('SELECT * FROM jobs WHERE run_id=? ORDER BY score DESC').all(id);
 const getCandidate=id=>db.prepare('SELECT * FROM candidates WHERE id=?').get(id);
 const latestRun=id=>db.prepare("SELECT * FROM runs WHERE candidate_id=? AND status<>'PREVIEW' ORDER BY id DESC LIMIT 1").get(id);
+function hydratedResumeProfile(resume,candidateId,supportDocuments=[]){
+  const current={...parseJson(resume?.profile_json,{}),candidateId,supportDocuments};
+  const sourceText=String(current.rawText||resume?.extracted_text||'');
+  const recovered=sourceText?inferProfile(sourceText):{};
+  const candidate=db.prepare('SELECT name FROM candidates WHERE id=?').get(Number(candidateId))||{};
+  const merged={...current};
+  for(const key of ['name','email','phone','address','neighborhood','residenceCity','residenceState','birthDate','cpf','cep']){
+    if(!String(merged[key]||'').trim()&&String(recovered?.[key]||'').trim())merged[key]=recovered[key];
+  }
+  if(!String(merged.name||'').trim()&&String(candidate.name||'').trim())merged.name=candidate.name;
+  if(resume?.id){
+    const persisted=parseJson(resume.profile_json,{});
+    let changed=false;
+    for(const key of ['name','email','phone','address','neighborhood','residenceCity','residenceState','birthDate','cpf','cep']){
+      if(String(merged[key]||'')!==String(persisted[key]||'')){persisted[key]=merged[key]||'';changed=true;}
+    }
+    if(changed)db.prepare('UPDATE resumes SET profile_json=? WHERE id=?').run(json(persisted),resume.id);
+  }
+  return merged;
+}
+
 function normalizeStoredFilenames(){
   for(const table of ['resumes','documents']){
     for(const row of db.prepare(`SELECT id,original_name FROM ${table}`).all()){
@@ -206,7 +227,7 @@ app.post('/api/resume/:id/optimize-base',async(req,res)=>{
     const id=Number(req.params.id),row=getResume(id);
     if(!row)return res.status(404).json({error:'Currículo não encontrado'});
     const supportDocuments=db.prepare('SELECT * FROM documents WHERE candidate_id=? AND is_primary=0 ORDER BY id').all(row.candidate_id);
-    const profile={...parseJson(row.profile_json,{}),candidateId:row.candidate_id,supportDocuments};
+    const profile=hydratedResumeProfile(row,row.candidate_id,supportDocuments);
     const focus=String(req.body?.focus||'').trim();
     const template=['executive','classic','compact'].includes(String(req.body?.template||''))?String(req.body.template):String(row.base_resume_template||'executive');
     const result=await optimizeBaseResume(row.stored_path,profile,focus,template);
@@ -324,7 +345,7 @@ app.post('/api/search', async (req,res) => {
     const {resumeId,filters={},preview=false} = req.body || {};
     let resume = getResume(Number(resumeId));
     if (!resume) return res.status(400).json({error:'Currículo não encontrado'});
-    const profile = {...parseJson(resume.profile_json,{}),candidateId:resume.candidate_id};
+    const profile=hydratedResumeProfile(resume,resume.candidate_id,[]);
     if(!resume.base_resume_path||!fs.existsSync(resume.base_resume_path)){
       const supportDocuments=db.prepare('SELECT * FROM documents WHERE candidate_id=? AND is_primary=0 ORDER BY id').all(resume.candidate_id);
       const baseProfile={...profile,supportDocuments};
@@ -463,7 +484,7 @@ async function processRun(runId,onlyErrors=false){
   const run=getRun(runId);if(!run)throw new Error('Execução não encontrada');
   const resume=getResume(run.resume_id);
   const supportDocuments=db.prepare('SELECT kind,original_name,stored_path FROM documents WHERE candidate_id=? AND is_primary=0').all(run.candidate_id);
-  const profile={...parseJson(resume.profile_json,{}),candidateId:run.candidate_id,supportDocuments};
+  const profile=hydratedResumeProfile(resume,run.candidate_id,supportDocuments);
   const prefs={...parseJson(run.filters_json,{}),candidateId:run.candidate_id};
   const dryRun=!prefs.autoSubmit;
   const applicationResume=(resume.base_resume_path&&fs.existsSync(resume.base_resume_path))?resume.base_resume_path:'';

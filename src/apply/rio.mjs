@@ -106,6 +106,8 @@ export async function applyRioVagasDirect(job,resumeFile,profile,prefs={},option
   if(!resumeFile||!fs.existsSync(resumeFile))return {status:'ERROR',error:'Currículo-base não encontrado'};
   const bytes=fs.statSync(resumeFile).size;
   if(bytes>2*1024*1024)return {status:'ERROR',error:'Currículo excede o limite de 2 MB do RioVagas: '+(bytes/1024/1024).toFixed(2)+' MB'};
+  if(!String(profile.name||'').trim()||!String(profile.email||'').trim()||!String(profile.phone||'').trim())
+    return {status:'ERROR',error:'RioVagas: nome, email ou celular ausente no perfil'};
   let form;
   try{form=await resolveRioApplyForm(job);}
   catch(e){
@@ -128,7 +130,6 @@ export async function applyRioVagasDirect(job,resumeFile,profile,prefs={},option
     resolved.push({id:q.id,question:q.question,value});
   }
   if(dryRun)return {status:'READY',error:''};
-  if(!profile.name||!profile.email||!profile.phone)return {status:'ERROR',error:'RioVagas: nome, email ou celular ausente no perfil'};
 
   const data=new FormData();
   data.set('ciente','on');

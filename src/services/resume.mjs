@@ -161,7 +161,25 @@ export function inferProfile(text){
   const lower=clean.toLowerCase();
   const emailCandidate=clean.match(/[A-Z0-9._%+-]+\s*@\s*[A-Z0-9.-]+\s*\.\s*[A-Z]{2,}/i)?.[0]||'';
   const email=emailCandidate.replace(/\s+/g,'');
-  const phone=clean.match(/(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?9?\d{4}[-\s]?\d{4}/)?.[0]||'';
+  const phone=(()=>{
+    for(const line of lines.slice(0,40)){
+      let digits=String(line||'').replace(/\D/g,'');
+      if((digits.length===12||digits.length===13)&&digits.startsWith('55'))digits=digits.slice(2);
+      if(digits.length===10||digits.length===11){
+        const ddd=digits.slice(0,2),local=digits.slice(2);
+        if(Number(ddd)>=11&&Number(ddd)<=99&&local.length>=8){
+          return `(${ddd}) ${local.length===9?local.slice(0,5):local.slice(0,4)}-${local.slice(-4)}`;
+        }
+      }
+    }
+    const loose=clean.match(/(?:\+?55\D{0,4})?\(?\s*\d{2}\s*\)?\D{0,6}9?\d{4}\D{0,6}\d{4}/)?.[0]||'';
+    const digits=loose.replace(/\D/g,'').replace(/^55(?=\d{10,11}$)/,'');
+    if(digits.length===10||digits.length===11){
+      const ddd=digits.slice(0,2),local=digits.slice(2);
+      return `(${ddd}) ${local.length===9?local.slice(0,5):local.slice(0,4)}-${local.slice(-4)}`;
+    }
+    return '';
+  })();
   const links=[...clean.matchAll(/https?:\/\/[^\s)]+/g)].map(x=>x[0]);
   const normalizeWebUrl=value=>{const v=String(value||'').replace(/[),.;]+$/,'').trim();return v&&!/^https?:\/\//i.test(v)?'https://'+v:v;};
   let linkedin=normalizeWebUrl(clean.match(/(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[A-Za-z0-9%._-]+/i)?.[0]||links.find(x=>/linkedin\.com/i.test(x))||'');

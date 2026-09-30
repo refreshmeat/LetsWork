@@ -4,6 +4,8 @@ import { db } from '../src/db.mjs';
 import { queryRioInventory, sourceRegistry } from '../src/services/inventory.mjs';
 import { prefilterJobsForAI } from '../src/services/ranking.mjs';
 import { knownAnswer, aiAnswers } from '../src/apply/answers.mjs';
+import { inferProfile } from '../src/services/resume.mjs';
+import { applyRioVagasDirect } from '../src/apply/rio.mjs';
 
 function assert(condition,message){
   if(!condition)throw new Error(message);
@@ -120,6 +122,14 @@ assert(/Ensino Médio/i.test(String(knownAnswer('Qual a sua escolaridade ?',synt
 assert(/Tanque|Rio de Janeiro/i.test(String(knownAnswer('Em qual cidade e bairro você reside?',syntheticMaria,mariaPrefs)||'')),'Cidade/bairro conhecidos deixaram de ser reconhecidos');
 const languageAnswers=await aiAnswers([{id:'1',question:'Tem Inglês intermediário',options:['Sim','Não']}],syntheticMaria,mariaPrefs,null);
 assert(languageAnswers.get('1')==='Não','Nível de idioma inferior ao exigido não foi respondido com segurança');
+const syntheticContactProfile=inferProfile('CRISTIANO TESTE\n( 21) 99042 â€“ 8876\ncristiano@example.com\nRio de Janeiro, RJ, Brasil');
+assert(syntheticContactProfile.phone==='(21) 99042-8876','Telefone com travessão/pontuação não foi normalizado');
+assert(syntheticContactProfile.email==='cristiano@example.com','E-mail sintético deixou de ser extraído');
+const contactProbe=path.resolve('tmp-contact-preflight.pdf');
+fs.writeFileSync(contactProbe,'fake-pdf');
+const missingContact=await applyRioVagasDirect({title:'Teste',url:'https://invalid.local/never-called'},contactProbe,{name:'Teste',email:'teste@example.com',phone:''},{},{dryRun:true});
+fs.rmSync(contactProbe,{force:true});
+assert(missingContact.status==='ERROR'&&/celular ausente/i.test(missingContact.error||''),'Dry-run voltou a ignorar contato obrigatório');
 console.log(JSON.stringify({
   ok:true,
   source:enabled[0].name,
