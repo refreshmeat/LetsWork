@@ -10,6 +10,7 @@ Aplicativo desktop para Windows que importa currículos, organiza o perfil profi
 - Atualização incremental durante o uso e nova reconciliação completa após 24 horas.
 - Filtros locais de 7, 15 e 30 dias.
 - Ranking profissional por regras objetivas e revisão local de casos ambíguos.
+- Área desejada informada pelo usuário tem prioridade. Se ficar vazia, o LetsWork tenta inferir a direção profissional a partir do currículo.
 - Currículo-base profissional em PDF, reutilizado nas candidaturas.
 - Pré-voo obrigatório de cada formulário antes de qualquer POST real.
 - Envio direto por HTTP.

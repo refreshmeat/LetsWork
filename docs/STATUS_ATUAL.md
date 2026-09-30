@@ -32,6 +32,9 @@ Fluxo principal:
 
 ## Ranking e formulários
 
+- Área desejada informada pelo usuário tem prioridade sobre inferências. Quando o campo fica vazio, o sistema tenta inferir a direção profissional a partir do currículo.
+- Testes feitos com área explicitamente preenchida validam busca/ranking dirigido, não inferência automática de carreira.
+
 - Regras determinísticas filtram incompatibilidades objetivas.
 - Ollama/llama3.2:3b revisa casos ambíguos.
 - Pré-voo obrigatório antes de qualquer envio real.
