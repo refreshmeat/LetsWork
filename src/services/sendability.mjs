@@ -102,6 +102,7 @@ async function followApplication(url,depth=0){
 export function initialSendability(job){
   const source=String(job?.source||''),url=String(job?.url||'');
   if(obviousListingJob(job))return {sendable:0,reason:'NOT_JOB_DETAIL',verified:true};
+  if(source==='Jobbol')return {sendable:0,reason:'HTTP_SCRIPT_BLOCKED',verified:true,httpReady:false};
   if(job?.requiresLogin===true&&source==='LinkedIn')return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false};
   if(job?.requiresLogin===true)return {sendable:0,reason:'LOGIN_REQUIRED',verified:true};
   if(source==='RioVagas'||/riovagas\.com\.br\/riovagas\//i.test(url))return {sendable:1,reason:'',verified:true,httpReady:true};
@@ -112,6 +113,7 @@ export function initialSendability(job){
 }
 export async function probeJobSendability(job){
   const source=String(job?.source||'');
+  if(source==='Jobbol')return {sendable:0,reason:'HTTP_SCRIPT_BLOCKED',verified:true,httpReady:false,detailText:String(job?.description||'').slice(0,30000)};
   const first=await fetchPage(job.url,7000);
   if(first.rateLimited)return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false,rateLimited:true};
   if(!first.ok)return {sendable:0,reason:'UNVERIFIED_LOGIN',verified:false};

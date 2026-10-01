@@ -116,7 +116,7 @@ function save(rows,{fullSnapshot=false}={}){
   if(!rows.length)return;
   const upsert=db.prepare(`INSERT INTO job_inventory
     (source,external_id,url,canonical_url,title,company,salary,location,description,contract_type,published_at,content_hash,active,apply_mode,last_seen_at)
-    VALUES('Jobbol',?,?,?,?,?,?,?,?,?,?,?,1,'DIRECT_HTTP',CURRENT_TIMESTAMP)
+    VALUES('Jobbol',?,?,?,?,?,?,?,?,?,?,?,1,'SEARCH_ONLY',CURRENT_TIMESTAMP)
     ON CONFLICT DO UPDATE SET
       external_id=excluded.external_id,url=excluded.url,canonical_url=excluded.canonical_url,
       title=excluded.title,company=excluded.company,salary=excluded.salary,location=excluded.location,

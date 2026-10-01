@@ -6,9 +6,13 @@ const { spawn, spawnSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const { applyPendingRestore } = require('./restore.cjs');
 
+// Evita travamentos de clique/renderizacao observados em algumas GPUs no Windows.
+app.disableHardwareAcceleration();
+
 const PORT=Number(process.env.PORT||4317);
 let mainWindow=null;
 let logFile=null;
+let rendererRecoveryTimer=null;
 const hasSingleInstanceLock=app.requestSingleInstanceLock();
 
 function log(msg){
@@ -160,7 +164,22 @@ async function createWindow(){
     log('Janela exibida por fallback');
   }
   mainWindow.on('close',()=>log('Janela principal recebeu evento close'));
-  mainWindow.webContents.on('render-process-gone',(event,details)=>log('RENDER_PROCESS_GONE '+JSON.stringify(details||{})));
+  mainWindow.webContents.on('render-process-gone',(event,details)=>{
+    log('RENDER_PROCESS_GONE '+JSON.stringify(details||{}));
+    const reason=String(details?.reason||'').toLowerCase();
+    if(!['crashed','killed','oom'].includes(reason)||!mainWindow||mainWindow.isDestroyed())return;
+    if(rendererRecoveryTimer)clearTimeout(rendererRecoveryTimer);
+    rendererRecoveryTimer=setTimeout(async()=>{
+      rendererRecoveryTimer=null;
+      try{
+        if(!mainWindow||mainWindow.isDestroyed())return;
+        await mainWindow.loadURL('http://127.0.0.1:'+PORT);
+        mainWindow.show();
+        mainWindow.focus();
+        log('Renderer recuperado automaticamente');
+      }catch(err){log('Falha ao recuperar renderer: '+String(err?.stack||err));}
+    },700);
+  });
   mainWindow.webContents.on('unresponsive',()=>log('RENDERER_UNRESPONSIVE'));
   mainWindow.webContents.on('responsive',()=>log('RENDERER_RESPONSIVE'));
   mainWindow.on('closed',()=>{log('Janela principal fechada');mainWindow=null;});

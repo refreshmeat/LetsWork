@@ -19,7 +19,9 @@ const sources=sourceRegistry();
 const enabled=sources.filter(x=>Number(x.enabled)===1);
 const enabledKeys=new Set(enabled.map(x=>x.source_key));
 assert(enabledKeys.has('rio')&&enabledKeys.has('jobbol')&&enabled.length===2,'RioVagas e Jobbol devem ser as fontes habilitadas');
-assert(enabled.every(x=>x.apply_mode==='DIRECT_HTTP'&&Number(x.login_required)===0),'Fontes habilitadas devem usar DIRECT_HTTP e nao exigir login previo');
+const rioSource=enabled.find(x=>x.source_key==='rio'),jobbolSource=enabled.find(x=>x.source_key==='jobbol');
+assert(rioSource?.apply_mode==='DIRECT_HTTP'&&Number(rioSource.login_required)===0,'RioVagas deve usar DIRECT_HTTP e nao exigir login previo');
+assert(jobbolSource?.apply_mode==='SEARCH_ONLY'&&Number(jobbolSource.login_required)===0,'Jobbol deve permanecer SEARCH_ONLY enquanto o bootstrap oficial de sessao/CSRF nao estiver disponivel');
 
 const inventoryCount=scalar("SELECT COUNT(*) n FROM job_inventory WHERE source='RioVagas' AND active=1");
 assert(inventoryCount>0,'Inventário RioVagas está vazio');
@@ -134,7 +136,10 @@ assert(appText.includes('function displayJobLocation(job)'),'Proteção visual d
 assert(appText.includes('if(!searchFilters.contractTypes.length)'),'Busca voltou a aceitar zero tipos de vaga selecionados');
 assert(appText.includes('function resetCandidateRunUi()'),'Troca de candidato deixou de limpar o estado visual imediatamente');
 assert(appText.includes('const searchSelectionSeq=candidateSelectionSeq'),'Busca assíncrona deixou de capturar o candidato ativo');
-assert(appText.includes("selectionSeq!==candidateSelectionSeq||Number(candidateId)!==targetCandidate||Number(runId)!==targetRun"),'Polling pode voltar a pintar dados de outro candidato');
+assert(appText.includes('function isRunContextActive(')&&appText.includes('if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;'),'Polling pode voltar a pintar dados de outro candidato');
+assert(appText.includes('function restoreCandidateInteractionState()')&&appText.includes('stopCandidateActivityTimers()'),'Troca de candidato pode voltar a herdar estado travado do lote anterior');
+const desktopMainText=fs.readFileSync(path.resolve('desktop/main.cjs'),'utf8');
+assert(desktopMainText.includes('app.disableHardwareAcceleration()'),'Protecao contra travamento de renderer/GPU foi removida');
 const loadRunGuard=appText.indexOf("Number(status.candidateId)!==expectedId");
 const loadRunAssign=appText.indexOf("runId=requestedRunId",loadRunGuard);
 assert(loadRunGuard>=0&&loadRunAssign>loadRunGuard,'loadRun voltou a assumir o run antes de validar o candidato');

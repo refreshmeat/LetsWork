@@ -256,6 +256,43 @@ async function savePendingData(){
 }
 
 
+function stopCandidateActivityTimers(){
+  if(searchElapsedTimer){clearInterval(searchElapsedTimer);searchElapsedTimer=null;}
+  if(searchReviewTimer){clearInterval(searchReviewTimer);searchReviewTimer=null;}
+  if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
+  if(selectionSaveTimer){clearTimeout(selectionSaveTimer);selectionSaveTimer=null;}
+}
+
+function isRunContextActive(targetRun,targetCandidate,selectionSeq){
+  return selectionSeq===candidateSelectionSeq
+    && Number(candidateId)===Number(targetCandidate)
+    && Number(runId)===Number(targetRun);
+}
+
+function restoreCandidateInteractionState(){
+  syncFilterInteractivity();
+  const panel=$('tab-search');
+  if(panel){
+    panel.inert=false;
+    panel.removeAttribute('inert');
+    panel.removeAttribute('aria-disabled');
+    panel.style.pointerEvents='auto';
+  }
+  document.querySelectorAll('#tab-search fieldset').forEach(fieldset=>{
+    fieldset.disabled=false;
+    fieldset.inert=false;
+    fieldset.removeAttribute('inert');
+    fieldset.removeAttribute('aria-disabled');
+    fieldset.style.pointerEvents='auto';
+  });
+  document.querySelectorAll('.tab').forEach(tab=>{
+    tab.disabled=false;
+    tab.removeAttribute('aria-disabled');
+    tab.style.pointerEvents='auto';
+  });
+  if($('searchBtn'))$('searchBtn').disabled=false;
+}
+
 function resetCandidateRunUi(){
   runId=null;
   currentJobs=[];
@@ -269,6 +306,11 @@ function resetCandidateRunUi(){
   if($('batchSelect')){$('batchSelect').classList.add('hidden');$('batchSelect').innerHTML='';}
   if($('runSummary')){$('runSummary').classList.add('hidden');$('runSummary').innerHTML='';}
   if($('runProgress'))$('runProgress').classList.add('hidden');
+  if($('uncertainWarning'))$('uncertainWarning').classList.add('hidden');
+  if($('jobStatusFilter'))$('jobStatusFilter').value='all';
+  if($('selectAllJobs')){$('selectAllJobs').checked=false;$('selectAllJobs').indeterminate=false;$('selectAllJobs').disabled=true;}
+  if($('applyBtn'))$('applyBtn').disabled=true;
+  if($('retryBtn'))$('retryBtn').disabled=true;
   if($('statJobs'))$('statJobs').textContent='0';
   if($('statStatus'))$('statStatus').textContent='Carregando';
   notice('searchStatus','');
@@ -278,25 +320,36 @@ function resetCandidateRunUi(){
 async function selectCandidate(id,options={}){
   const selectionSeq=++candidateSelectionSeq;
   const requestedCandidateId=Number(id);
-  if(searchReviewTimer){clearInterval(searchReviewTimer);searchReviewTimer=null;}
-  if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
+  stopCandidateActivityTimers();
   resetCandidateRunUi();
-  // Cada candidato começa com busca ampla por padrão; filtros restritivos de outro candidato não vazam para este perfil.
+  restoreCandidateInteractionState();
   $('locationScope').value='state_priority';
   $('experienceLevel').value='entry';
-  const r=await fetch(`/api/candidate/${requestedCandidateId}`),d=await r.json();
-  if(selectionSeq!==candidateSelectionSeq)return;
-  if(!r.ok) return toast(d.error||'Candidato não encontrado');
-  candidateId=requestedCandidateId; currentCandidate=d; resumeId=d.resume?.id||null;
-  $('newCandidateView').classList.add('hidden'); $('candidateView').classList.remove('hidden');
-  $('candidateActions').classList.remove('hidden'); $('pageTitle').textContent=d.candidate.name;
-  if($('deleteSearchHistory'))$('deleteSearchHistory').disabled=!(d.runs||[]).length;
-  $('pageSubtitle').textContent=d.resume?.original_name?`Currículo: ${d.resume.original_name}`:'Cadastro local';
-  fillProfile(d.resume?.profile||{}); renderBaseResume(d.resume||{}); renderDocuments(d.documents||[]);
-  await loadPendingData(requestedCandidateId,selectionSeq);
-  if(selectionSeq!==candidateSelectionSeq||candidateId!==requestedCandidateId)return;
-  activateTab(options.tab||'search'); syncFilterInteractivity();
-  renderCandidates(); await refreshCandidateStats(d,selectionSeq,requestedCandidateId);
+
+  try{
+    const r=await fetch('/api/candidate/'+requestedCandidateId),d=await r.json();
+    if(selectionSeq!==candidateSelectionSeq)return;
+    if(!r.ok){toast(d.error||'Candidato não encontrado');return;}
+    candidateId=requestedCandidateId; currentCandidate=d; resumeId=d.resume?.id||null;
+    $('newCandidateView').classList.add('hidden'); $('candidateView').classList.remove('hidden');
+    $('candidateActions').classList.remove('hidden'); $('pageTitle').textContent=d.candidate.name;
+    if($('deleteSearchHistory'))$('deleteSearchHistory').disabled=!(d.runs||[]).length;
+    $('pageSubtitle').textContent=d.resume?.original_name?'Currículo: '+d.resume.original_name:'Cadastro local';
+    fillProfile(d.resume?.profile||{}); renderBaseResume(d.resume||{}); renderDocuments(d.documents||[]);
+    await loadPendingData(requestedCandidateId,selectionSeq);
+    if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==requestedCandidateId)return;
+    activateTab(options.tab||'search');
+    restoreCandidateInteractionState();
+    renderCandidates();
+    await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+    await refreshCandidateStats(d,selectionSeq,requestedCandidateId);
+  }catch(err){
+    if(selectionSeq===candidateSelectionSeq)toast('Erro ao abrir candidato: '+(err?.message||err));
+  }finally{
+    if(selectionSeq===candidateSelectionSeq&&Number(candidateId)===requestedCandidateId){
+      restoreCandidateInteractionState();
+    }
+  }
 }
 async function refreshCandidateStats(detail=currentCandidate,selectionSeq=candidateSelectionSeq,expectedCandidateId=candidateId){
   if(selectionSeq!==candidateSelectionSeq||Number(expectedCandidateId)!==Number(candidateId))return;
@@ -541,11 +594,30 @@ function filters(){
     autoSubmit:$('submitMode').value==='live'};
 }
 function syncFilterInteractivity(){
-  const locationIds=['state','city','locationScope'];
-  for(const id of locationIds){const el=$(id);if(el){el.disabled=false;el.readOnly=false;el.style.pointerEvents='auto';}}
-  const alwaysEnabled=['area','workMode','pcdMode','experienceLevel','recencyDays','clt','pj','internship','temporary','apprentice','freelance','salaryExpectation','submitMode','availability','salaryFromJob','searchBtn'];
-  for(const id of alwaysEnabled){const el=$(id);if(el){el.disabled=false;el.readOnly=false;el.style.pointerEvents='auto';}}
-  const panel=$('tab-search');if(panel)panel.style.pointerEvents='auto';
+  const ids=['state','city','locationScope','area','workMode','pcdMode','experienceLevel','recencyDays','clt','pj','internship','temporary','apprentice','freelance','salaryExpectation','submitMode','availability','salaryFromJob'];
+  for(const id of ids){
+    const el=$(id);
+    if(el){
+      el.disabled=false;
+      el.readOnly=false;
+      el.removeAttribute('aria-disabled');
+      el.style.pointerEvents='auto';
+    }
+  }
+  const panel=$('tab-search');
+  if(panel){
+    panel.inert=false;
+    panel.removeAttribute('inert');
+    panel.removeAttribute('aria-disabled');
+    panel.style.pointerEvents='auto';
+  }
+  document.querySelectorAll('#tab-search fieldset').forEach(fieldset=>{
+    fieldset.disabled=false;
+    fieldset.inert=false;
+    fieldset.removeAttribute('inert');
+    fieldset.removeAttribute('aria-disabled');
+    fieldset.style.pointerEvents='auto';
+  });
 }
 window.addEventListener('focus',syncFilterInteractivity);
 
@@ -671,42 +743,58 @@ $('searchBtn').addEventListener('click',async()=>{
   finally{clearInterval(searchElapsedTimer);searchElapsedTimer=null;$('searchBtn').disabled=false;}
 });
 
-async function refreshApplications(){
-  if(!runId) return;
-  const targetRun=Number(runId),targetCandidate=Number(candidateId),selectionSeq=candidateSelectionSeq;
-  const r=await fetch(`/api/run/${targetRun}/applications`); if(!r.ok) return;
+async function refreshApplications(targetRun=Number(runId),targetCandidate=Number(candidateId),selectionSeq=candidateSelectionSeq){
+  if(!targetRun) return;
+  const r=await fetch('/api/run/'+targetRun+'/applications'); if(!r.ok) return;
   const rows=await r.json();
-  if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==targetCandidate||Number(runId)!==targetRun)return;
-  currentStatuses=new Map(rows.map(x=>[x.url,x])); renderJobs(currentJobs,currentStatuses);
+  if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;
+  currentStatuses=new Map(rows.map(x=>[x.url,x]));
+  renderJobs(currentJobs,currentStatuses);
 }
 
-async function pollStatus(){
-  if(!runId) return;
-  const targetRun=Number(runId),targetCandidate=Number(candidateId),selectionSeq=candidateSelectionSeq;
-  const r=await fetch(`/api/run/${targetRun}/status`); if(!r.ok) return;
+async function pollStatus(targetRun=Number(runId),targetCandidate=Number(candidateId),selectionSeq=candidateSelectionSeq){
+  if(!targetRun||!isRunContextActive(targetRun,targetCandidate,selectionSeq)) return;
+  const r=await fetch('/api/run/'+targetRun+'/status'); if(!r.ok) return;
   const d=await r.json();
-  if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==targetCandidate||Number(runId)!==targetRun||Number(d.candidateId)!==targetCandidate)return;
+  if(!isRunContextActive(targetRun,targetCandidate,selectionSeq)||Number(d.candidateId)!==Number(targetCandidate))return;
   const c=d.counts||{};
   currentRunMode=d.mode==='live'?'live':'dry';
   const statusLabel={PREFLIGHTING:'Pré-validando formulários',CANARY:'Validando primeiro envio',APPLYING:'Enviando candidaturas',RETRYING:'Retentando candidaturas',ERROR_PREFLIGHT:'Pré-voo bloqueou o envio',ERROR_DISPATCH_PAUSED:'Envio pausado por segurança',DONE:'Concluído'}[String(d.status||'').toUpperCase()]||d.status||'Processando';
   $('statStatus').textContent=statusLabel;
   const terminal=(c.SENT||0)+(c.ALREADY_APPLIED||0)+(c.READY||0)+(c.ERROR||0)+(c.PROFILE_REQUIRED||0)+(c.NEEDS_DATA||0)+(c.INVALID_FORM||0)+(c.UNCERTAIN||0)+(c.CLOSED||0)+(c.SKIPPED_INCOMPATIBLE||0);
-  notice('applyStatus',`Processadas: ${terminal}/${d.total||0} · Enviadas: ${c.SENT||0} · Validadas: ${c.READY||0} · Dados do perfil: ${(c.PROFILE_REQUIRED||0)+(c.NEEDS_DATA||0)} · Formulário inválido: ${c.INVALID_FORM||0} · Erros: ${c.ERROR||0} · Sem confirmação: ${c.UNCERTAIN||0} · Encerradas: ${c.CLOSED||0}`);
+  notice('applyStatus','Processadas: '+terminal+'/'+(d.total||0)+' · Enviadas: '+(c.SENT||0)+' · Validadas: '+(c.READY||0)+' · Dados do perfil: '+((c.PROFILE_REQUIRED||0)+(c.NEEDS_DATA||0))+' · Formulário inválido: '+(c.INVALID_FORM||0)+' · Erros: '+(c.ERROR||0)+' · Sem confirmação: '+(c.UNCERTAIN||0)+' · Encerradas: '+(c.CLOSED||0));
   updateRunSummary(c,Number(d.total||0),d.status);
   if(d.status==='DONE'||d.status==='CANCELLED'||String(d.status).startsWith('ERROR')){
-    clearInterval(pollTimer);pollTimer=null;$('applyBtn').disabled=false;
-    await refreshApplications();await loadCandidates();renderCandidates();await loadPendingData();
-    if(selectionSeq!==candidateSelectionSeq||Number(candidateId)!==targetCandidate||Number(runId)!==targetRun)return;
-    const finalStatus=await fetch(`/api/run/${targetRun}/status`).then(x=>x.ok?x.json():null).catch(()=>null);
-    if(finalStatus&&selectionSeq===candidateSelectionSeq&&Number(candidateId)===targetCandidate&&Number(finalStatus.candidateId)===targetCandidate)updateRunSummary(finalStatus.counts||{},Number(finalStatus.total||0),finalStatus.status);
+    if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
+    if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;
+    $('applyBtn').disabled=false;
+
+    await refreshApplications(targetRun,targetCandidate,selectionSeq);
+    if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;
+
+    await loadCandidates();
+    if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;
+    renderCandidates();
+
+    await loadPendingData(targetCandidate,selectionSeq);
+    if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;
+
+    restoreCandidateInteractionState();
+    const finalStatus=await fetch('/api/run/'+targetRun+'/status').then(x=>x.ok?x.json():null).catch(()=>null);
+    if(finalStatus&&isRunContextActive(targetRun,targetCandidate,selectionSeq)&&Number(finalStatus.candidateId)===Number(targetCandidate)){
+      updateRunSummary(finalStatus.counts||{},Number(finalStatus.total||0),finalStatus.status);
+      restoreCandidateInteractionState();
+    }
   }
 }
 
 async function startRun(endpoint){
   if(!runId) return;
+  const targetRun=Number(runId),targetCandidate=Number(candidateId),selectionSeq=candidateSelectionSeq;
   if(endpoint==='apply'){
     if(!selectedJobIds.size){toast('Selecione pelo menos uma vaga para processar.');return;}
     if(!await saveJobSelection())return;
+    if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;
   }
   if(searchReviewTimer){clearInterval(searchReviewTimer);searchReviewTimer=null;}
   let confirmLive=false;
@@ -722,11 +810,17 @@ async function startRun(endpoint){
     if(!window.confirm(msg))return;
     confirmLive=retryLive;
   }
+  if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;
   $('applyBtn').disabled=true;$('retryBtn').disabled=true;$('statStatus').textContent=currentRunMode==='live'?'Pré-validando formulários':'Simulando formulários';
-  const r=await fetch(`/api/run/${runId}/${endpoint}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirmLive,selectedJobIds:endpoint==='apply'?[...selectedJobIds]:undefined})}),d=await r.json();
-  if(!r.ok){notice('applyStatus',`Erro: ${d.error||'falha'}`);$('applyBtn').disabled=false;$('retryBtn').disabled=false;return;}
+  const r=await fetch('/api/run/'+targetRun+'/'+endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({confirmLive,selectedJobIds:endpoint==='apply'?[...selectedJobIds]:undefined})}),d=await r.json();
+  if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;
+  if(!r.ok){notice('applyStatus','Erro: '+(d.error||'falha'));$('applyBtn').disabled=false;$('retryBtn').disabled=false;restoreCandidateInteractionState();return;}
   notice('applyStatus',endpoint==='retry'?'Retentativa iniciada.':'Processamento iniciado.');
-  if(pollTimer) clearInterval(pollTimer);await pollStatus();pollTimer=setInterval(pollStatus,2500);
+  if(pollTimer) clearInterval(pollTimer);
+  await pollStatus(targetRun,targetCandidate,selectionSeq);
+  if(isRunContextActive(targetRun,targetCandidate,selectionSeq)){
+    pollTimer=setInterval(()=>pollStatus(targetRun,targetCandidate,selectionSeq),2500);
+  }
 }
 $('selectAllJobs').addEventListener('change',()=>{
   const selectableIds=currentJobs.filter(isJobSelectable).map(j=>Number(j.id));
