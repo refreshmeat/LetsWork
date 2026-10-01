@@ -1,7 +1,33 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 $ollamaUrl = 'http://127.0.0.1:11434'
 $ollamaDownloadUrl = 'https://ollama.com/download/OllamaSetup.exe'
+$logFile = Join-Path $env:TEMP 'LetsWork-AI-Install.log'
+Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+
+function Write-InstallLog([string]$Message) {
+  $line = ('[{0}] {1}' -f (Get-Date).ToString('s'), $Message)
+  Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
+  Write-Host $Message
+}
+
+function Invoke-WithRetry([scriptblock]$Action, [string]$Label, [int]$Attempts = 3, [int]$DelaySeconds = 4) {
+  $lastError = $null
+  for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+    try {
+      if ($attempt -gt 1) { Write-InstallLog "$Label - tentativa $attempt de $Attempts..." }
+      & $Action
+      return
+    } catch {
+      $lastError = $_
+      Write-InstallLog "$Label falhou na tentativa ${attempt}: $($_.Exception.Message)"
+      if ($attempt -lt $Attempts) { Start-Sleep -Seconds $DelaySeconds }
+    }
+  }
+  throw $lastError
+}
 
 function Find-OllamaExe {
   $candidates = @(
@@ -10,7 +36,7 @@ function Find-OllamaExe {
     (Join-Path $env:ProgramFiles 'Ollama\ollama.exe')
   )
   foreach ($candidate in $candidates) {
-    if ($candidate -and (Test-Path $candidate)) { return $candidate }
+    if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
   }
   $cmd = Get-Command ollama.exe -ErrorAction SilentlyContinue
   if ($cmd) { return $cmd.Source }
@@ -19,19 +45,31 @@ function Find-OllamaExe {
 
 function Test-OllamaApi {
   try {
-    $null = Invoke-RestMethod -Uri "$ollamaUrl/api/tags" -Method Get -TimeoutSec 3
+    $null = Invoke-RestMethod -Uri "$ollamaUrl/api/tags" -Method Get -TimeoutSec 4
     return $true
   } catch {
     return $false
   }
 }
 
-function Wait-OllamaApi([int]$Seconds = 30) {
+function Wait-OllamaApi([int]$Seconds = 90) {
   $deadline = (Get-Date).AddSeconds($Seconds)
   do {
     if (Test-OllamaApi) { return $true }
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 750
   } while ((Get-Date) -lt $deadline)
+  return $false
+}
+
+function Test-OllamaModel([string]$Model) {
+  try {
+    $data = Invoke-RestMethod -Uri "$ollamaUrl/api/tags" -Method Get -TimeoutSec 8
+    foreach ($item in @($data.models)) {
+      $name = [string]($item.name)
+      if (-not $name) { $name = [string]($item.model) }
+      if ($name -eq $Model -or $name.StartsWith($Model + '-')) { return $true }
+    }
+  } catch {}
   return $false
 }
 
@@ -52,70 +90,110 @@ function Get-GpuVramBytes {
   return 0
 }
 
-$ramBytes = 0
-try { $ramBytes = [double](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory } catch {}
-$gpuBytes = Get-GpuVramBytes
-$model = if ($ramBytes -ge 16GB -and $gpuBytes -ge 6GB) { 'llama3.1:8b' } else { 'llama3.2:3b' }
+try {
+  $ramBytes = 0
+  try { $ramBytes = [double](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory } catch {}
+  $gpuBytes = Get-GpuVramBytes
+  $model = if ($ramBytes -ge 16GB -and $gpuBytes -ge 6GB) { 'llama3.1:8b' } else { 'llama3.2:3b' }
 
-Write-Host "Preparando a IA local do LetsWork com $model..."
-
-$ollamaExe = Find-OllamaExe
-if (-not $ollamaExe) {
-  $tempInstaller = Join-Path $env:TEMP 'LetsWork-OllamaSetup.exe'
-  Remove-Item $tempInstaller -Force -ErrorAction SilentlyContinue
-
-  Write-Host 'Baixando o instalador oficial do Ollama...'
-  Invoke-WebRequest -Uri $ollamaDownloadUrl -OutFile $tempInstaller -UseBasicParsing
-
-  $signature = Get-AuthenticodeSignature -FilePath $tempInstaller
-  if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Ollama') {
-    Remove-Item $tempInstaller -Force -ErrorAction SilentlyContinue
-    throw 'A assinatura digital do instalador do Ollama nao e valida.'
-  }
-
-  Write-Host 'Instalando Ollama...'
-  $proc = Start-Process -FilePath $tempInstaller -ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES' -PassThru
-  $proc.WaitForExit()
-  Remove-Item $tempInstaller -Force -ErrorAction SilentlyContinue
-  if ($proc.ExitCode -ne 0) {
-    throw "A instalacao do Ollama falhou com codigo $($proc.ExitCode)."
-  }
+  Write-InstallLog "Preparando a IA local do LetsWork com $model..."
 
   $ollamaExe = Find-OllamaExe
   if (-not $ollamaExe) {
-    throw 'O Ollama terminou a instalacao, mas o executavel nao foi localizado.'
+    $tempInstaller = Join-Path $env:TEMP 'LetsWork-OllamaSetup.exe'
+    Remove-Item -LiteralPath $tempInstaller -Force -ErrorAction SilentlyContinue
+
+    Invoke-WithRetry -Label 'Download do Ollama' -Action {
+      Write-InstallLog 'Baixando o instalador oficial do Ollama...'
+      Remove-Item -LiteralPath $tempInstaller -Force -ErrorAction SilentlyContinue
+      Invoke-WebRequest -Uri $ollamaDownloadUrl -OutFile $tempInstaller -UseBasicParsing -TimeoutSec 180
+      if (-not (Test-Path -LiteralPath $tempInstaller)) { throw 'O arquivo do instalador nao foi criado.' }
+      if ((Get-Item -LiteralPath $tempInstaller).Length -lt 1MB) { throw 'O download do Ollama ficou incompleto.' }
+    }
+
+    $signature = Get-AuthenticodeSignature -FilePath $tempInstaller
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Ollama') {
+      Remove-Item -LiteralPath $tempInstaller -Force -ErrorAction SilentlyContinue
+      throw 'A assinatura digital do instalador do Ollama nao e valida.'
+    }
+
+    Write-InstallLog 'Instalando Ollama silenciosamente...'
+
+    # Mesmo marcador usado pelo instalador oficial do Ollama para impedir
+    # que o app/TUI seja aberto durante uma instalacao silenciosa.
+    $markerDir = Join-Path $env:LOCALAPPDATA 'Ollama'
+    $markerFile = Join-Path $markerDir 'upgraded'
+    New-Item -ItemType Directory -Force -Path $markerDir | Out-Null
+    New-Item -ItemType File -Force -Path $markerFile | Out-Null
+
+    $installerArgs = '/VERYSILENT /NORESTART /SUPPRESSMSGBOXES'
+    $proc = Start-Process -FilePath $tempInstaller -ArgumentList $installerArgs -PassThru
+    $proc.WaitForExit()
+    $installerExitCode = $proc.ExitCode
+    Remove-Item -LiteralPath $tempInstaller -Force -ErrorAction SilentlyContinue
+
+    if ($installerExitCode -ne 0) {
+      throw "A instalacao do Ollama falhou com codigo $installerExitCode."
+    }
+
+    $deadline = (Get-Date).AddSeconds(20)
+    do {
+      $ollamaExe = Find-OllamaExe
+      if ($ollamaExe) { break }
+      Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    if (-not $ollamaExe) {
+      throw 'O Ollama terminou a instalacao, mas o executavel nao foi localizado.'
+    }
+    Write-InstallLog "Ollama instalado em $ollamaExe"
+  } else {
+    Write-InstallLog "Ollama ja instalado em $ollamaExe"
   }
-}
 
-if (-not (Test-OllamaApi)) {
-  Write-Host 'Iniciando o servico local do Ollama...'
-  Start-Process -FilePath $ollamaExe -ArgumentList 'serve' -WindowStyle Hidden
-  if (-not (Wait-OllamaApi 45)) {
-    throw 'O Ollama foi instalado, mas o servico local nao respondeu.'
+  if (-not (Test-OllamaApi)) {
+    Write-InstallLog 'Iniciando o servico local do Ollama...'
+    Start-Process -FilePath $ollamaExe -ArgumentList 'serve' -WindowStyle Hidden | Out-Null
+    if (-not (Wait-OllamaApi 90)) {
+      throw 'O Ollama foi instalado, mas o servico local nao respondeu em 90 segundos.'
+    }
   }
-}
+  Write-InstallLog 'Servico local do Ollama conectado.'
 
-$installed = & $ollamaExe list 2>$null | Out-String
-if ($installed -notmatch [regex]::Escape($model)) {
-  Write-Host "Baixando o modelo $model. A instalacao so termina quando a IA estiver pronta..."
-  & $ollamaExe pull $model
-  if ($LASTEXITCODE -ne 0) {
-    throw "Falha ao baixar o modelo $model."
+  if (-not (Test-OllamaModel $model)) {
+    Invoke-WithRetry -Label "Download do modelo $model" -Attempts 3 -DelaySeconds 5 -Action {
+      Write-InstallLog "Baixando o modelo $model. Isso pode levar varios minutos..."
+      $pullOutput = & $ollamaExe pull $model 2>&1
+      if ($pullOutput) { Add-Content -LiteralPath $logFile -Value ($pullOutput | Out-String) -Encoding UTF8 }
+      if ($LASTEXITCODE -ne 0) {
+        throw "ollama pull terminou com codigo $LASTEXITCODE."
+      }
+      if (-not (Test-OllamaModel $model)) {
+        throw "O modelo $model ainda nao aparece na API do Ollama."
+      }
+    }
   }
+
+  if (-not (Test-OllamaApi)) {
+    throw 'O servico do Ollama deixou de responder durante a validacao final.'
+  }
+  if (-not (Test-OllamaModel $model)) {
+    throw "O modelo $model nao ficou disponivel apos a instalacao."
+  }
+
+  $dataRoot = Join-Path $env:USERPROFILE 'LetsWork\dados'
+  New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
+  @{
+    provider = 'ollama'
+    model = $model
+    installedAt = (Get-Date).ToUniversalTime().ToString('o')
+    ready = $true
+  } | ConvertTo-Json | Set-Content -Path (Join-Path $dataRoot 'ai-install.json') -Encoding UTF8
+
+  Write-InstallLog "IA local pronta. Modelo confirmado: $model"
+  exit 0
+} catch {
+  Write-InstallLog ('ERRO: ' + $_.Exception.Message)
+  Write-InstallLog "Consulte o log: $logFile"
+  exit 1
 }
-
-$installed = & $ollamaExe list 2>$null | Out-String
-if ($installed -notmatch [regex]::Escape($model)) {
-  throw "O modelo $model nao ficou disponivel apos a instalacao."
-}
-
-$dataRoot = Join-Path $env:USERPROFILE 'LetsWork\dados'
-New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
-@{
-  provider = 'ollama'
-  model = $model
-  installedAt = (Get-Date).ToUniversalTime().ToString('o')
-} | ConvertTo-Json | Set-Content -Path (Join-Path $dataRoot 'ai-install.json') -Encoding UTF8
-
-Write-Host 'IA local pronta.'
-exit 0

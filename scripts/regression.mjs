@@ -15,6 +15,13 @@ function scalar(sql,...args){
   return Number(db.prepare(sql).get(...args)?.n||0);
 }
 
+const prereqInstallerText=fs.readFileSync(path.resolve('build/letswork-prereqs.ps1'),'utf8');
+const nsisInstallerText=fs.readFileSync(path.resolve('build/installer.nsh'),'utf8');
+assert(prereqInstallerText.includes("Join-Path $markerDir 'upgraded'")&&prereqInstallerText.includes('/VERYSILENT /NORESTART /SUPPRESSMSGBOXES'),'Instalador voltou a abrir a interface do Ollama durante o provisionamento');
+assert(prereqInstallerText.includes('Invoke-WithRetry')&&prereqInstallerText.includes('Test-OllamaModel'),'Provisionamento da IA perdeu retry ou validacao final do modelo');
+assert(nsisInstallerText.includes('-WindowStyle Hidden')&&nsisInstallerText.includes('LetsWork-AI-Install.log'),'Instalador voltou a expor console do Ollama ou perdeu log de diagnostico');
+assert(!nsisInstallerText.includes('isUpdated'),'Reinstalacao voltou a pular a validacao/reparo da IA local');
+
 const sources=sourceRegistry();
 const enabled=sources.filter(x=>Number(x.enabled)===1);
 const enabledKeys=new Set(enabled.map(x=>x.source_key));
