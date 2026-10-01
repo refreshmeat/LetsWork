@@ -1,23 +1,33 @@
-LETSWORK v0.1.0 - INSTALACAO EM OUTRO PC
+LETSWORK v0.1.1 - INSTALACAO EM OUTRO PC
 ================================================
 
 REQUISITOS
 - Windows 10 ou 11, 64 bits.
-- Internet na instalacao e para atualizar as vagas.
+- Internet durante a instalacao e para atualizar as vagas.
 - Espaco livre para o LetsWork, Ollama e o modelo local de IA.
 - Para curriculos antigos .DOC/.RTF/.ODT, Microsoft Word pode ser necessario.
   Prefira PDF ou DOCX.
 
 INSTALACAO
-1. Execute "Instalar LetsWork 0.1.0.exe".
-2. O MESMO instalador prepara tudo:
+1. Execute "Instalar LetsWork 0.1.1.exe".
+2. O MESMO instalador prepara tudo automaticamente:
    - instala o LetsWork;
-   - baixa o Ollama oficial, se necessario;
+   - baixa o instalador oficial do Ollama, se necessario;
    - valida a assinatura digital do Ollama;
-   - instala o Ollama silenciosamente;
-   - baixa e valida o modelo local de IA.
-3. A instalacao so termina quando a IA local estiver pronta.
-4. Ao final, use somente o atalho "LetsWork" criado na Area de Trabalho ou no Menu Iniciar.
+   - instala o Ollama silenciosamente, sem abrir o menu de integracoes;
+   - inicia o servico local;
+   - baixa o modelo de IA adequado ao computador;
+   - tenta novamente automaticamente em falhas transitorias de download;
+   - valida o servico e o modelo antes de concluir.
+3. O download do modelo pode ter varios GB e levar alguns minutos.
+4. A instalacao so termina com a IA local validada.
+5. Ao final, abra somente o atalho "LetsWork".
+
+Nao instale Claude Code, OpenCode, Hermes, OpenClaw, ChatGPT ou qualquer integracao oferecida pelo Ollama.
+Essas ferramentas NAO fazem parte do LetsWork e nao sao necessarias.
+
+Se a preparacao da IA falhar mesmo apos as tentativas automaticas, o diagnostico fica em:
+%TEMP%\LetsWork-AI-Install.log
 
 Nao existe segunda etapa, arquivo .cmd ou instalacao manual do Ollama.
 
@@ -28,7 +38,6 @@ DADOS E BANCO DE VAGAS
 - O banco SQLite local e criado automaticamente no novo computador.
 - Na primeira abertura, o LetsWork sincroniza o inventario do RioVagas.
 - Enquanto o programa estiver aberto, o inventario recebe manutencao automatica.
-- Uma nova reconciliacao completa ocorre quando a ultima reconciliacao tiver 24 horas ou mais.
 - Ao abrir novamente, o LetsWork sincroniza o inventario antes de iniciar uma busca.
 
 CURRICULOS
@@ -37,10 +46,10 @@ CURRICULOS
 - O curriculo-base final ocupa uma pagina.
 - Secoes duplicadas ou dados inconsistentes bloqueiam a geracao em vez de salvar um PDF defeituoso.
 
-USO DA v0.1.0
+USO DA v0.1.1
 - Fonte de vagas: RioVagas.
 - A candidatura real passa por pre-voo antes do envio.
 - SENT so e exibido quando existe confirmacao positiva persistida.
 
 VERSAO
-LetsWork 0.1.0 FINAL
+LetsWork 0.1.1
