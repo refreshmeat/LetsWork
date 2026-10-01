@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell } = require('electron');
+﻿const { app, BrowserWindow, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -8,11 +8,15 @@ const { applyPendingRestore } = require('./restore.cjs');
 
 // Evita travamentos de clique/renderizacao observados em algumas GPUs no Windows.
 app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-gpu-compositing');
 
 const PORT=Number(process.env.PORT||4317);
 let mainWindow=null;
 let logFile=null;
 let rendererRecoveryTimer=null;
+let rendererUnresponsiveTimer=null;
+let recoveringWindow=false;
 const hasSingleInstanceLock=app.requestSingleInstanceLock();
 
 function log(msg){
@@ -90,7 +94,7 @@ async function ensureOllama(){
     online=await waitUrl(process.env.OLLAMA_URL+'/api/tags',60);
   }
   if(!online){
-    log('Ollama indisponível. Instale o Ollama para usar a IA local.');
+    log('Ollama indisponÃ­vel. Instale o Ollama para usar a IA local.');
     return false;
   }
   if(!(await ollamaModelReady(model))){
@@ -99,7 +103,7 @@ async function ensureOllama(){
       try{spawn(exe,['pull',model],{windowsHide:true,detached:true,stdio:'ignore'}).unref();}
       catch(e){log('Falha ao baixar modelo '+model+': '+String(e?.message||e));}
     }else{
-      log('Ollama online, mas o executável não foi localizado para baixar '+model);
+      log('Ollama online, mas o executÃ¡vel nÃ£o foi localizado para baixar '+model);
     }
   }else{
     log('IA local pronta: '+model);
@@ -110,13 +114,13 @@ async function ensureOllama(){
 async function ensureServer(){
   const statusUrl=`http://127.0.0.1:${PORT}/api/ai/status`;
   if(await waitUrl(statusUrl,4)){
-    log('Servidor local já disponível');
+    log('Servidor local jÃ¡ disponÃ­vel');
     return true;
   }
   const serverPath=path.join(__dirname,'..','src','server.mjs');
   await import(pathToFileURL(serverPath).href);
   const ok=await waitUrl(statusUrl,120);
-  if(!ok)throw new Error('O servidor local do LetsWork não iniciou.');
+  if(!ok)throw new Error('O servidor local do LetsWork nÃ£o iniciou.');
   log('Servidor local iniciado no processo principal');
   return true;
 }
@@ -164,25 +168,41 @@ async function createWindow(){
     log('Janela exibida por fallback');
   }
   mainWindow.on('close',()=>log('Janela principal recebeu evento close'));
-  mainWindow.webContents.on('render-process-gone',(event,details)=>{
+  const windowRef=mainWindow;
+  windowRef.webContents.on('render-process-gone',(event,details)=>{
     log('RENDER_PROCESS_GONE '+JSON.stringify(details||{}));
     const reason=String(details?.reason||'').toLowerCase();
-    if(!['crashed','killed','oom'].includes(reason)||!mainWindow||mainWindow.isDestroyed())return;
+    if(!['crashed','killed','oom'].includes(reason)||recoveringWindow)return;
+    recoveringWindow=true;
+    if(rendererUnresponsiveTimer){clearTimeout(rendererUnresponsiveTimer);rendererUnresponsiveTimer=null;}
     if(rendererRecoveryTimer)clearTimeout(rendererRecoveryTimer);
-    rendererRecoveryTimer=setTimeout(async()=>{
+    rendererRecoveryTimer=setTimeout(()=>{
       rendererRecoveryTimer=null;
       try{
-        if(!mainWindow||mainWindow.isDestroyed())return;
-        await mainWindow.loadURL('http://127.0.0.1:'+PORT);
-        mainWindow.show();
-        mainWindow.focus();
-        log('Renderer recuperado automaticamente');
-      }catch(err){log('Falha ao recuperar renderer: '+String(err?.stack||err));}
-    },700);
+        if(!windowRef.isDestroyed())windowRef.destroy();
+      }catch(err){log('Falha ao destruir janela quebrada: '+String(err?.message||err));}
+      if(mainWindow===windowRef)mainWindow=null;
+      createWindow().then(()=>log('Janela recriada apos falha do renderer')).catch(err=>log('Falha ao recriar janela: '+String(err?.stack||err))).finally(()=>{recoveringWindow=false;});
+    },500);
   });
-  mainWindow.webContents.on('unresponsive',()=>log('RENDERER_UNRESPONSIVE'));
-  mainWindow.webContents.on('responsive',()=>log('RENDERER_RESPONSIVE'));
-  mainWindow.on('closed',()=>{log('Janela principal fechada');mainWindow=null;});
+  windowRef.webContents.on('unresponsive',()=>{
+    log('RENDERER_UNRESPONSIVE');
+    if(rendererUnresponsiveTimer)clearTimeout(rendererUnresponsiveTimer);
+    rendererUnresponsiveTimer=setTimeout(()=>{
+      rendererUnresponsiveTimer=null;
+      if(!recoveringWindow&&!windowRef.isDestroyed()){
+        recoveringWindow=true;
+        try{windowRef.destroy();}catch{}
+        if(mainWindow===windowRef)mainWindow=null;
+        createWindow().then(()=>log('Janela recriada apos renderer sem resposta')).catch(err=>log('Falha ao recriar janela: '+String(err?.stack||err))).finally(()=>{recoveringWindow=false;});
+      }
+    },5000);
+  });
+  windowRef.webContents.on('responsive',()=>{
+    log('RENDERER_RESPONSIVE');
+    if(rendererUnresponsiveTimer){clearTimeout(rendererUnresponsiveTimer);rendererUnresponsiveTimer=null;}
+  });
+  windowRef.on('closed',()=>{log('Janela principal fechada');if(mainWindow===windowRef)mainWindow=null;});
 }
 
 if(!hasSingleInstanceLock){
@@ -211,5 +231,8 @@ app.on('before-quit',()=>{
   stopExternalServerProcesses();
 });
 app.on('window-all-closed',()=>{
+  if(recoveringWindow)return;
   if(process.platform!=='darwin')app.quit();
 });
+
+
