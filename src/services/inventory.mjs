@@ -109,5 +109,5 @@ export function runMetrics(runId){
 }
 
 export function sourceRegistry(){
-  return db.prepare('SELECT * FROM source_registry ORDER BY enabled DESC,name').all();
+  return db.prepare("SELECT * FROM source_registry WHERE source_key='rio' ORDER BY name").all();
 }
