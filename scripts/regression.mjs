@@ -134,11 +134,14 @@ assert(appText.includes('function resetCandidateRunUi()'),'Troca de candidato de
 assert(appText.includes('const searchSelectionSeq=candidateSelectionSeq'),'Busca assíncrona deixou de capturar o candidato ativo');
 assert(appText.includes('function isRunContextActive(')&&appText.includes('if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;'),'Polling pode voltar a pintar dados de outro candidato');
 assert(appText.includes('function restoreCandidateInteractionState()')&&appText.includes('stopCandidateActivityTimers()'),'Troca de candidato pode voltar a herdar estado travado do lote anterior');
+assert(appText.includes('const searchFilterDrafts=new Map()')&&appText.includes('restoreSearchFilterDraft(requestedCandidateId)'),'Filtros voltaram a vazar entre candidatos após um lote');
+assert(appText.includes('rememberSearchFilterDraft(previousCandidateId)'),'Troca de candidato deixou de preservar um rascunho de filtro independente');
 const desktopMainText=fs.readFileSync(path.resolve('desktop/main.cjs'),'utf8');
 assert(desktopMainText.includes('app.disableHardwareAcceleration()'),'Protecao contra travamento de renderer/GPU foi removida');
 const loadRunGuard=appText.indexOf("Number(status.candidateId)!==expectedId");
+const loadRunMode=appText.indexOf("currentRunMode=status.mode==='live'?'live':'dry';",loadRunGuard);
 const loadRunAssign=appText.indexOf("runId=requestedRunId",loadRunGuard);
-assert(loadRunGuard>=0&&loadRunAssign>loadRunGuard,'loadRun voltou a assumir o run antes de validar o candidato');
+assert(loadRunGuard>=0&&loadRunMode>loadRunGuard&&loadRunAssign>loadRunGuard,'loadRun voltou a assumir estado do lote antes de validar o candidato');
 
 const syntheticDesignFilters={
   nationwide:false,state:'RJ',city:'Rio de Janeiro',cities:['Rio de Janeiro'],states:['RJ'],locationScope:'state_priority',
