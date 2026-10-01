@@ -138,6 +138,7 @@ assert(appText.includes('function resetCandidateRunUi()'),'Troca de candidato de
 assert(appText.includes('const searchSelectionSeq=candidateSelectionSeq'),'Busca assíncrona deixou de capturar o candidato ativo');
 assert(appText.includes('function isRunContextActive(')&&appText.includes('if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;'),'Polling pode voltar a pintar dados de outro candidato');
 assert(appText.includes('function restoreCandidateInteractionState()')&&appText.includes('stopCandidateActivityTimers()'),'Troca de candidato pode voltar a herdar estado travado do lote anterior');
+assert(appText.includes('function appConfirm(')&&!appText.includes('window.confirm('),'Confirmacao nativa do Electron voltou a bloquear os selects apos o fluxo real');
 assert(appText.includes('const searchFilterDrafts=new Map()')&&appText.includes('restoreSearchFilterDraft(requestedCandidateId)'),'Filtros voltaram a vazar entre candidatos após um lote');
 assert(appText.includes('rememberSearchFilterDraft(previousCandidateId)'),'Troca de candidato deixou de preservar um rascunho de filtro independente');
 const desktopMainText=fs.readFileSync(path.resolve('desktop/main.cjs'),'utf8');

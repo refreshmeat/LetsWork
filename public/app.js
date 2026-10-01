@@ -62,6 +62,46 @@ function restoreSearchFilterDraft(id){
 }
 
 
+let activeAppConfirm=null;
+function appConfirm(message,{title='Confirmar ação',confirmText='Confirmar',cancelText='Cancelar',danger=false}={}){
+  if(activeAppConfirm)activeAppConfirm(false);
+  return new Promise(resolve=>{
+    const overlay=document.createElement('div');
+    overlay.className='app-confirm-backdrop';
+    overlay.innerHTML=`<div class="app-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="appConfirmTitle">
+      <div class="app-confirm-title" id="appConfirmTitle">${esc(title)}</div>
+      <div class="app-confirm-message">${esc(message).replace(/\\n/g,'<br>')}</div>
+      <div class="app-confirm-actions">
+        <button type="button" class="ghost" data-confirm-cancel>${esc(cancelText)}</button>
+        <button type="button" class="${danger?'app-confirm-danger':'primary'}" data-confirm-ok>${esc(confirmText)}</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    const cancel=overlay.querySelector('[data-confirm-cancel]');
+    const ok=overlay.querySelector('[data-confirm-ok]');
+    let done=false;
+    const keyHandler=e=>{
+      if(e.key==='Escape'){e.preventDefault();finish(false);}
+      else if(e.key==='Enter'){e.preventDefault();finish(true);}
+    };
+    const finish=value=>{
+      if(done)return;
+      done=true;
+      window.removeEventListener('keydown',keyHandler,true);
+      overlay.remove();
+      activeAppConfirm=null;
+      restoreCandidateInteractionState();
+      resolve(Boolean(value));
+    };
+    activeAppConfirm=finish;
+    cancel.addEventListener('click',()=>finish(false));
+    ok.addEventListener('click',()=>finish(true));
+    overlay.addEventListener('mousedown',e=>{if(e.target===overlay)finish(false);});
+    window.addEventListener('keydown',keyHandler,true);
+    requestAnimationFrame(()=>ok.focus());
+  });
+}
+
 function toast(text){
   const el=$('sessionStatus');
   el.textContent=text; el.classList.remove('hidden');
@@ -112,7 +152,7 @@ async function loadAI(){
 $('backupImportBtn')?.addEventListener('click',()=>$('backupFile')?.click());
 $('backupFile')?.addEventListener('change',async()=>{
   const file=$('backupFile').files?.[0];if(!file)return;
-  if(!window.confirm('Importar este backup? O LetsWork validará o arquivo e aplicará a restauração na próxima inicialização.')){$('backupFile').value='';return;}
+  if(!await appConfirm('Importar este backup? O LetsWork validará o arquivo e aplicará a restauração na próxima inicialização.',{confirmText:'Importar'})){$('backupFile').value='';return;}
   const btn=$('backupImportBtn');btn.disabled=true;btn.textContent='Validando backup...';
   try{
     const fd=new FormData();fd.append('backup',file);
@@ -209,7 +249,7 @@ function renderDocuments(documents=[]){
   box.querySelectorAll('.document-delete').forEach(b=>b.addEventListener('click',async()=>{
     const primary=b.dataset.primary==='1';
     const msg=primary?'Excluir o currículo principal? Se houver outro arquivo, ele vira o principal. Se não houver, será preciso criar outro cadastro para pesquisar vagas.':'Excluir este arquivo do candidato?';
-    if(!window.confirm(msg)) return;
+    if(!await appConfirm(msg,{confirmText:'Excluir',danger:true})) return;
     const r=await fetch(`/api/candidate/${candidateId}/document/${b.dataset.id}`,{method:'DELETE'}),d=await r.json().catch(()=>({}));
     if(!r.ok) return toast(`Erro: ${d.error||'não foi possível excluir o arquivo'}`);
     toast('Arquivo excluído.'); await selectCandidate(candidateId); activateTab('profile');
@@ -848,7 +888,7 @@ async function startRun(endpoint){
   if(searchReviewTimer){clearInterval(searchReviewTimer);searchReviewTimer=null;}
   let confirmLive=false;
   if(endpoint==='apply'&&$('submitMode').value==='live'){
-    if(!window.confirm('Modo real: o LetsWork poderá enviar candidaturas de verdade. Continuar?')) return;
+    if(!await appConfirm('Modo real: o LetsWork poderá enviar candidaturas de verdade. Continuar?',{title:'Confirmar modo real',confirmText:'Enviar candidaturas'})) return;
     confirmLive=true;
   }
   if(endpoint==='retry'){
@@ -856,7 +896,7 @@ async function startRun(endpoint){
     const msg=retryLive
       ? 'Retentar erros e pendências deste lote em MODO REAL? Erros, dados de perfil e formulários inválidos serão revalidados. Envios sem confirmação NÃO serão repetidos.'
       : 'Retentar erros e pendências desta simulação? Erros, dados de perfil e formulários inválidos serão revalidados. Envios sem confirmação NÃO serão repetidos.';
-    if(!window.confirm(msg))return;
+    if(!await appConfirm(msg,{title:retryLive?'Retentar em modo real':'Retentar simulação',confirmText:'Retentar'}))return;
     confirmLive=retryLive;
   }
   if(!isRunContextActive(targetRun,targetCandidate,selectionSeq))return;
@@ -909,7 +949,7 @@ $('deleteSearchHistory').addEventListener('click',async()=>{
   const sent=Number(summary.sent||0),runs=Number(summary.runs||currentCandidate?.runs?.length||0);
   if(!runs){toast('Este candidato ainda não possui buscas para excluir.');return;}
   const warning=`Excluir ${runs} busca(s) anterior(es) deste candidato? Isso apaga candidaturas registradas, relatórios e marcações de vaga ENVIADA, mas preserva o currículo e os dados pessoais.${sent?` Há ${sent} envio(s) registrado(s); depois da exclusão, essas vagas poderão aparecer como novas e ser processadas novamente.`:''}`;
-  if(!window.confirm(warning))return;
+  if(!await appConfirm(warning,{title:'Excluir buscas anteriores',confirmText:'Excluir buscas',danger:true}))return;
   const r=await fetch(`/api/candidate/${candidateId}/search-history`,{method:'DELETE'}),d=await r.json().catch(()=>({}));
   if(!r.ok)return toast(`Erro: ${d.error||'não foi possível excluir as buscas'}`);
   runId=null;currentJobs=[];currentStatuses=new Map();selectedJobIds.clear();
@@ -922,8 +962,8 @@ $('deleteCandidate').addEventListener('click',async()=>{
   const warning=reports.length
     ?`Este candidato possui ${reports.length} relatório(s) salvo(s). A exclusão também apagará esses arquivos. Confirme que você já baixou o que precisa.`
     :'Esse cadastro e todos os arquivos locais dele serão apagados.';
-  if(!window.confirm(warning)) return;
-  if(!window.confirm(`Excluir definitivamente ${currentCandidate?.candidate?.name||'este candidato'}?`)) return;
+  if(!await appConfirm(warning,{title:'Excluir candidato',confirmText:'Continuar',danger:true})) return;
+  if(!await appConfirm(`Excluir definitivamente ${currentCandidate?.candidate?.name||'este candidato'}?`,{title:'Confirmação final',confirmText:'Excluir candidato',danger:true})) return;
   const r=await fetch(`/api/candidate/${candidateId}`,{method:'DELETE'}),d=await r.json().catch(()=>({}));
   if(!r.ok) return toast(`Erro: ${d.error||'não foi possível excluir'}`);
   toast('Candidato e dados locais excluídos.');
