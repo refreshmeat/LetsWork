@@ -1,11 +1,13 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $ollamaUrl = 'http://127.0.0.1:11434'
 $ollamaDownloadUrl = 'https://ollama.com/download/OllamaSetup.exe'
 $logFile = Join-Path $env:TEMP 'LetsWork-AI-Install.log'
+$errorFile = Join-Path $env:TEMP 'LetsWork-AI-Install-error.txt'
 Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $errorFile -Force -ErrorAction SilentlyContinue
 
 function Write-InstallLog([string]$Message) {
   $line = ('[{0}] {1}' -f (Get-Date).ToString('s'), $Message)
@@ -91,14 +93,25 @@ function Get-GpuVramBytes {
 }
 
 try {
-  $ramBytes = 0
-  try { $ramBytes = [double](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory } catch {}
-  $gpuBytes = Get-GpuVramBytes
-  $model = if ($ramBytes -ge 16GB -and $gpuBytes -ge 6GB) { 'llama3.1:8b' } else { 'llama3.2:3b' }
+  $model = 'llama3.2:3b'
 
   Write-InstallLog "Preparando a IA local do LetsWork com $model..."
 
   $ollamaExe = Find-OllamaExe
+  try {
+    $driveRoot = [System.IO.Path]::GetPathRoot($env:USERPROFILE)
+    $freeBytes = [System.IO.DriveInfo]::new($driveRoot).AvailableFreeSpace
+    $requiredBytes = if ($ollamaExe) { 3GB } else { 7GB }
+    if ($freeBytes -lt $requiredBytes) {
+      $freeGB = [math]::Round($freeBytes / 1GB, 1)
+      $requiredGB = [math]::Round($requiredBytes / 1GB, 0)
+      throw ("Espaco livre insuficiente na unidade do usuario: {0} GB. Libere pelo menos {1} GB e tente novamente." -f $freeGB,$requiredGB)
+    }
+  } catch {
+    if ($_.Exception.Message -like 'Espaco livre insuficiente*') { throw }
+    Write-InstallLog "Nao foi possivel medir o espaco livre; continuando a validacao."
+  }
+
   if (-not $ollamaExe) {
     $tempInstaller = Join-Path $env:TEMP 'LetsWork-OllamaSetup.exe'
     Remove-Item -LiteralPath $tempInstaller -Force -ErrorAction SilentlyContinue
@@ -106,7 +119,7 @@ try {
     Invoke-WithRetry -Label 'Download do Ollama' -Action {
       Write-InstallLog 'Baixando o instalador oficial do Ollama...'
       Remove-Item -LiteralPath $tempInstaller -Force -ErrorAction SilentlyContinue
-      Invoke-WebRequest -Uri $ollamaDownloadUrl -OutFile $tempInstaller -UseBasicParsing -TimeoutSec 180
+      Invoke-WebRequest -Uri $ollamaDownloadUrl -OutFile $tempInstaller -UseBasicParsing -TimeoutSec 1800
       if (-not (Test-Path -LiteralPath $tempInstaller)) { throw 'O arquivo do instalador nao foi criado.' }
       if ((Get-Item -LiteralPath $tempInstaller).Length -lt 1MB) { throw 'O download do Ollama ficou incompleto.' }
     }
@@ -166,7 +179,11 @@ try {
       $pullOutput = & $ollamaExe pull $model 2>&1
       if ($pullOutput) { Add-Content -LiteralPath $logFile -Value ($pullOutput | Out-String) -Encoding UTF8 }
       if ($LASTEXITCODE -ne 0) {
-        throw "ollama pull terminou com codigo $LASTEXITCODE."
+        $detail = (($pullOutput | Select-Object -Last 6) -join ' ').Trim()
+        if ($detail) {
+          throw "Falha ao baixar o modelo $model (codigo $LASTEXITCODE): $detail"
+        }
+        throw "Falha ao baixar o modelo $model (codigo $LASTEXITCODE)."
       }
       if (-not (Test-OllamaModel $model)) {
         throw "O modelo $model ainda nao aparece na API do Ollama."
@@ -193,7 +210,10 @@ try {
   Write-InstallLog "IA local pronta. Modelo confirmado: $model"
   exit 0
 } catch {
-  Write-InstallLog ('ERRO: ' + $_.Exception.Message)
+  $errorMessage = [string]$_.Exception.Message
+  Write-InstallLog ('ERRO: ' + $errorMessage)
   Write-InstallLog "Consulte o log: $logFile"
+  Set-Content -LiteralPath $errorFile -Value $errorMessage -Encoding UTF8
   exit 1
 }
+
