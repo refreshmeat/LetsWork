@@ -16,7 +16,7 @@ INSTALACAO
    - valida a assinatura digital do Ollama;
    - instala o Ollama silenciosamente, sem abrir o menu de integracoes;
    - inicia o servico local;
-   - baixa o modelo de IA adequado ao computador;
+   - baixa e valida o modelo local llama3.2:3b;
    - tenta novamente automaticamente em falhas transitorias de download;
    - valida o servico e o modelo antes de concluir.
 3. O download do modelo pode ter varios GB e levar alguns minutos.

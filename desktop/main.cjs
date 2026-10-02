@@ -82,8 +82,7 @@ async function ensureOllama(){
   process.env.LETSWORK_AI_PROVIDER='ollama';
   process.env.OLLAMA_URL=process.env.OLLAMA_URL||'http://127.0.0.1:11434';
   if(!process.env.OLLAMA_MODEL){
-    const gpuVram=detectedGpuVramBytes();
-    process.env.OLLAMA_MODEL=(os.totalmem()>=16*1024**3&&gpuVram>=6*1024**3)?'llama3.1:8b':'llama3.2:3b';
+    process.env.OLLAMA_MODEL='llama3.2:3b';
   }
   const model=process.env.OLLAMA_MODEL;
   let online=await waitUrl(process.env.OLLAMA_URL+'/api/tags',3);

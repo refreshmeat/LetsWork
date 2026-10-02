@@ -28,7 +28,7 @@ O código e o instalador não carregam currículos, bancos, documentos ou histó
 
 ## IA local
 
-A v0.1 usa Ollama para revisar casos ambíguos. O instalador único do LetsWork baixa o instalador oficial do Ollama quando necessário, valida sua assinatura digital, instala silenciosamente e baixa o modelo local adequado ao hardware antes de concluir.
+A v0.1 usa Ollama para revisar casos ambíguos. O instalador único do LetsWork baixa o instalador oficial do Ollama quando necessário, valida sua assinatura digital, instala silenciosamente e baixa o modelo local llama3.2:3b antes de concluir.
 
 Não existe etapa manual separada para instalar ou preparar o Ollama. As regras determinísticas continuam sendo a base do sistema.
 

@@ -21,6 +21,11 @@ assert(prereqInstallerText.includes("Join-Path $markerDir 'upgraded'")&&prereqIn
 assert(prereqInstallerText.includes('Invoke-WithRetry')&&prereqInstallerText.includes('Test-OllamaModel'),'Provisionamento da IA perdeu retry ou validacao final do modelo');
 assert(nsisInstallerText.includes('-WindowStyle Hidden')&&nsisInstallerText.includes('LetsWork-AI-Install.log'),'Instalador voltou a expor console do Ollama ou perdeu log de diagnostico');
 assert(!nsisInstallerText.includes('isUpdated'),'Reinstalacao voltou a pular a validacao/reparo da IA local');
+assert(prereqInstallerText.includes("$model = 'llama3.2:3b'")&&!prereqInstallerText.includes("'llama3.1:8b'"),'Instalador voltou a selecionar modelo 8b automaticamente');
+assert(nsisInstallerText.includes('LetsWork-AI-Install-error.txt'),'Instalador perdeu a exibicao da causa real da falha de IA');
+const desktopRuntimeText=fs.readFileSync(path.resolve('desktop/main.cjs'),'utf8');
+assert(desktopRuntimeText.includes("process.env.OLLAMA_MODEL='llama3.2:3b'")&&!desktopRuntimeText.includes("'llama3.1:8b'"),'Desktop voltou a trocar automaticamente para modelo 8b');
+
 
 const sources=sourceRegistry();
 const enabled=sources.filter(x=>Number(x.enabled)===1);
