@@ -30,6 +30,7 @@ const uploadDir = runtime.uploads;
 const reportDir = runtime.reports;
 let rioStartupSyncPromise=null;
 let rioStartupSyncing=false;
+let rioManualSyncing=false;
 function startRioStartupSync(){
   if(rioStartupSyncPromise)return rioStartupSyncPromise;
   rioStartupSyncing=true;
@@ -42,7 +43,7 @@ function startRioStartupSync(){
       console.log('[RioVagas] sincronizacao de abertura falhou:',String(e?.message||e));
       return {ok:false,error:String(e?.message||e)};
     })
-    .finally(()=>{rioStartupSyncing=false;});
+    .finally(()=>{rioStartupSyncing=false;rioStartupSyncPromise=null;});
   return rioStartupSyncPromise;
 }
 let jobbolStartupSyncPromise=null;
@@ -1034,7 +1035,22 @@ async function runJobbolInventoryMaintenance(){
 }
 
 app.get('/api/inventory/riovagas/status',(req,res)=>{
-  try{res.json(getRioVagasInventoryStatus());}catch(e){res.status(500).json({error:String(e?.message||e)});}
+  try{res.json({...getRioVagasInventoryStatus(),syncing:rioStartupSyncing||rioManualSyncing});}catch(e){res.status(500).json({error:String(e?.message||e)});}
+});
+
+app.post('/api/inventory/riovagas/sync',async(req,res)=>{
+  try{
+    rioManualSyncing=true;
+    const status=await maintainRioVagasInventory();
+    if(status?.ok===false)return res.status(502).json({error:'Falha ao atualizar as vagas do RioVagas',...status});
+    console.log('[RioVagas] atualizacao manual: '+Number(status.active||0)+' vagas ativas; '+(status.fullSnapshot?'reconciliacao completa':'atualizacao incremental'));
+    res.json({ok:true,...status});
+  }catch(e){
+    console.log('[RioVagas] atualizacao manual falhou:',String(e?.message||e));
+    res.status(500).json({error:String(e?.message||e)});
+  }finally{
+    rioManualSyncing=false;
+  }
 });
 app.get('/api/inventory/jobbol/status',(req,res)=>{
   try{res.json(getJobbolInventoryStatus());}catch(e){res.status(500).json({error:String(e?.message||e)});}

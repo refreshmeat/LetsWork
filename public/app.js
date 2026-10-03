@@ -16,6 +16,7 @@ let currentStatuses=new Map();
 let currentRunMode='dry';
 let uploadInFlight=false;
 let candidateSelectionSeq=0;
+let inventoryStatusTimer=null;
 
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -119,15 +120,25 @@ function activateTab(name){
 }
 document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>activateTab(b.dataset.tab)));
 async function loadSystemStatus(){
+  let nextRefreshMs=60000;
   try{
     const r=await fetch('/api/system/status'),d=await r.json();
-    const inv=d.inventory||{},rio=inv.rio||{},jobbol=inv.jobbol||{};
-    const active=Number(rio.active||0)+Number(jobbol.active||0);
-    const latest=[rio.last_sync_at,jobbol.last_sync_at].filter(Boolean).sort().at(-1),last=latest?dateBR(latest):'';
-    if($('inventoryLabel'))$('inventoryLabel').textContent=`RioVagas + Jobbol · ${active.toLocaleString('pt-BR')} vagas`;
-    if($('inventoryMeta'))$('inventoryMeta').textContent=`até 30 dias${last?` · atualizado ${last}`:''}`;
+    const inv=d.inventory||{},active=Number(inv.active||0),last=inv.last_sync_at?dateBR(inv.last_sync_at):'';
+    const syncing=Boolean(inv.syncing||inv.startupSyncing);
+    if($('inventoryLabel'))$('inventoryLabel').textContent='RioVagas · '+active.toLocaleString('pt-BR')+' vagas';
+    if($('inventoryMeta'))$('inventoryMeta').textContent=syncing?'Atualizando vagas...':('até 30 dias'+(last?' · atualizado '+last:''));
+    const btn=$('refreshInventoryBtn');
+    if(btn&&!btn.dataset.busy){
+      btn.disabled=syncing;
+      btn.textContent=syncing?'Atualizando vagas...':'Atualizar vagas';
+    }
+    if(syncing)nextRefreshMs=2000;
   }catch{
     if($('inventoryMeta'))$('inventoryMeta').textContent='Inventário local indisponível';
+    nextRefreshMs=10000;
+  }finally{
+    clearTimeout(inventoryStatusTimer);
+    inventoryStatusTimer=setTimeout(loadSystemStatus,nextRefreshMs);
   }
 }
 
@@ -149,19 +160,25 @@ async function loadAI(){
   }
 }
 
-$('backupImportBtn')?.addEventListener('click',()=>$('backupFile')?.click());
-$('backupFile')?.addEventListener('change',async()=>{
-  const file=$('backupFile').files?.[0];if(!file)return;
-  if(!await appConfirm('Importar este backup? O LetsWork validará o arquivo e aplicará a restauração na próxima inicialização.',{confirmText:'Importar'})){$('backupFile').value='';return;}
-  const btn=$('backupImportBtn');btn.disabled=true;btn.textContent='Validando backup...';
+$('refreshInventoryBtn')?.addEventListener('click',async()=>{
+  const btn=$('refreshInventoryBtn');
+  btn.dataset.busy='1';
+  btn.disabled=true;
+  btn.textContent='Atualizando vagas...';
+  if($('inventoryMeta'))$('inventoryMeta').textContent='Buscando novas vagas no RioVagas...';
   try{
-    const fd=new FormData();fd.append('backup',file);
-    const r=await fetch('/api/backup/import',{method:'POST',body:fd});
+    const r=await fetch('/api/inventory/riovagas/sync',{method:'POST'});
     const d=await r.json().catch(()=>({}));
-    if(!r.ok)throw new Error(d.error||'Falha ao importar backup');
-    toast(`Backup validado: ${d.summary?.candidateCount||0} candidato(s). Feche e abra o LetsWork para restaurar.`);
-  }catch(e){toast('Erro no backup: '+(e.message||e));}
-  finally{btn.disabled=false;btn.textContent='Importar backup';$('backupFile').value='';}
+    if(!r.ok)throw new Error(d.error||'Falha ao atualizar vagas');
+    toast('Vagas atualizadas: '+Number(d.active||0).toLocaleString('pt-BR')+' ativas.');
+  }catch(e){
+    toast('Erro ao atualizar vagas: '+(e.message||e));
+  }finally{
+    delete btn.dataset.busy;
+    btn.disabled=false;
+    btn.textContent='Atualizar vagas';
+    await loadSystemStatus();
+  }
 });
 
 function renderCandidates(){
