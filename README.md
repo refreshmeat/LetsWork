@@ -86,3 +86,15 @@ O build oficial gera um único instalador NSIS para Windows x64. `build/installe
 ## Release
 
 A v0.1.0 é a primeira versão fechada para distribuição controlada em outros computadores Windows.
+
+
+## Atualizacao 03/10/2026
+
+- Corrigida a geracao dos tres modelos de curriculo: Executivo, Classico e Compacto.
+- Curriculos agora usam uma pagina completa, margens e espacamentos consistentes, melhor distribuicao visual e alinhamento adequado.
+- Adicionado fluxo manual de Atualizar vagas, mantendo a manutencao automatica do inventario.
+- Release 0.1.1 recompilada e assinada; pacote de instalacao regenerado.
+- Codigo correspondente mantido tambem na linha 0.2.
+- Limpeza local executada: removidos scripts temporarios de diagnostico/renderizacao e artefatos de build regeneraveis.
+- Estado oficial local: v0.1-fix (branch v0.1.1-fix), app (branch v0.2-jobbol), dados e distribuicao.
+- Executaveis oficiais na Area de Trabalho: LetsWork 0.1.exe e LetsWork 0.2.exe.
