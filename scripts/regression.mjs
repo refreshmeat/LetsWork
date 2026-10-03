@@ -27,6 +27,12 @@ const desktopRuntimeText=fs.readFileSync(path.resolve('desktop/main.cjs'),'utf8'
 assert(desktopRuntimeText.includes("process.env.OLLAMA_MODEL='llama3.2:3b'")&&!desktopRuntimeText.includes("'llama3.1:8b'"),'Desktop voltou a trocar automaticamente para modelo 8b');
 
 
+assert(fs.readFileSync(path.resolve('public/index.html'),'utf8').includes('id="refreshInventoryBtn"'),'Botao Atualizar vagas ausente da interface');
+assert(!fs.readFileSync(path.resolve('public/index.html'),'utf8').includes('id="backupExport"')&&!fs.readFileSync(path.resolve('public/index.html'),'utf8').includes('id="backupImportBtn"'),'Botoes de backup voltaram para a barra lateral');
+const serverText=fs.readFileSync(path.resolve('src/server.mjs'),'utf8');
+assert(serverText.includes("app.post('/api/inventory/riovagas/sync'"),'Rota manual de atualizacao do inventario ausente');
+assert(serverText.includes('rioStartupSyncPromise=null;});'),'Promessa da sincronizacao de abertura nao e liberada apos concluir');
+
 const sources=sourceRegistry();
 const enabled=sources.filter(x=>Number(x.enabled)===1);
 assert(enabled.length===1&&enabled[0].source_key==='rio','Somente RioVagas pode estar habilitado');
