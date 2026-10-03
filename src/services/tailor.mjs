@@ -171,9 +171,9 @@ function wrapText(font,text,size,maxWidth){
   return lines;
 }
 const RESUME_TEMPLATES={
-  executive:{accent:[.08,.16,.25],ink:[.07,.08,.10],muted:[.36,.40,.44],line:[.80,.83,.86],margin:42,nameSize:25,targetSize:11.5,sectionSize:10.6,bodySize:10.3,leading:14.5,itemGap:6},
-  classic:{accent:[.10,.10,.10],ink:[.07,.07,.07],muted:[.38,.38,.38],line:[.78,.78,.78],margin:48,nameSize:23,targetSize:11,sectionSize:10.2,bodySize:10.0,leading:13.8,itemGap:5},
-  compact:{accent:[.13,.18,.23],ink:[.07,.08,.09],muted:[.40,.42,.45],line:[.83,.85,.87],margin:40,nameSize:21,targetSize:10.5,sectionSize:9.7,bodySize:9.3,leading:12.4,itemGap:3}
+  executive:{accent:[.06,.34,.24],ink:[.06,.075,.07],muted:[.34,.38,.36],line:[.80,.84,.82],soft:[.945,.968,.955],margin:42,nameSize:25,targetSize:11.6,sectionSize:10.5,bodySize:10.25,leading:14.4,itemGap:6,fontFamily:'sans',headerMode:'band'},
+  classic:{accent:[.12,.12,.12],ink:[.055,.055,.055],muted:[.38,.38,.38],line:[.74,.74,.72],soft:[.965,.958,.94],margin:47,nameSize:25,targetSize:11.1,sectionSize:10.3,bodySize:10.2,leading:14.4,itemGap:6,fontFamily:'serif',headerMode:'centered'},
+  compact:{accent:[.11,.23,.28],ink:[.07,.08,.09],muted:[.40,.42,.44],line:[.82,.85,.87],soft:[.95,.965,.97],margin:39,nameSize:22,targetSize:10.6,sectionSize:9.8,bodySize:9.4,leading:12.6,itemGap:3.6,fontFamily:'sans',headerMode:'compact'}
 };
 function resumeTemplateName(value){return Object.hasOwn(RESUME_TEMPLATES,String(value||''))?String(value):'executive';}
 function resumeDisplayUrl(value){
@@ -213,27 +213,72 @@ function parseProjectEntry(value){
   return {title:(pos>=0?text.slice(0,pos):text).trim(),description:(pos>=0?text.slice(pos+3):'').trim(),raw:text};
 }
 async function renderResumePdf(source,job,profile,content,template='executive'){
-  const style=RESUME_TEMPLATES[resumeTemplateName(template)];
+  const templateName=resumeTemplateName(template);
+  const style={...RESUME_TEMPLATES[templateName]};
+  const contentChars=[
+    content.summary||'',
+    ...(content.experience||[]),
+    ...(content.education||[]),
+    ...(content.courses||[]),
+    ...(content.projects||[]),
+    ...(content.skills||[]),
+    ...(content.languages||[]),
+    ...(content.other||[])
+  ].join(' ').length;
+  const stretch=contentChars<950?1.22:contentChars<1350?1.14:contentChars<1800?1.07:1;
+  style.bodySize*=Math.min(stretch,1.14);
+  style.leading*=stretch;
+  style.itemGap*=stretch;
+  style.sectionSize*=Math.min(stretch,1.08);
+  style.nameSize*=Math.min(stretch,1.08);
+  style.targetSize*=Math.min(stretch,1.05);
+
   const pdf=await PDFDocument.create();
-  const regular=await pdf.embedFont(StandardFonts.Helvetica);
-  const bold=await pdf.embedFont(StandardFonts.HelveticaBold);
+  const serif=style.fontFamily==='serif';
+  const regular=await pdf.embedFont(serif?StandardFonts.TimesRoman:StandardFonts.Helvetica);
+  const bold=await pdf.embedFont(serif?StandardFonts.TimesRomanBold:StandardFonts.HelveticaBold);
+  const italic=await pdf.embedFont(serif?StandardFonts.TimesRomanItalic:StandardFonts.HelveticaOblique);
   const pageSize=[595.28,841.89],margin=style.margin,maxWidth=pageSize[0]-margin*2;
   let page,y;
   const toColor=a=>rgb(a[0],a[1],a[2]);
-  const ink=toColor(style.ink),muted=toColor(style.muted),accent=toColor(style.accent),line=toColor(style.line);
+  const ink=toColor(style.ink),muted=toColor(style.muted),accent=toColor(style.accent),line=toColor(style.line),soft=toColor(style.soft);
+  const white=rgb(1,1,1);
 
   const newPage=(continuation=false)=>{
     page=pdf.addPage(pageSize);y=pageSize[1]-margin;
     if(continuation){
-      page.drawText(String(profile.name||'Candidato').slice(0,80),{x:margin,y,size:9.4,font:bold,color:muted});
+      page.drawText(String(profile.name||'Candidato').slice(0,80),{x:margin,y,size:9.3,font:bold,color:muted});
       y-=14;page.drawLine({start:{x:margin,y},end:{x:pageSize[0]-margin,y},thickness:.5,color:line});y-=17;
     }
   };
-  const ensure=height=>{if(y-height<margin+14)newPage(true);};
-  const drawLines=(text,size=style.bodySize,font=regular,color=ink,indent=0,leading=style.leading,max=maxWidth-indent)=>{
+  const ensure=height=>{if(y-height<margin+12)newPage(true);};
+  const centeredX=(text,font,size)=>Math.max(margin,(pageSize[0]-font.widthOfTextAtSize(String(text||''),size))/2);
+
+  const drawJustifiedLine=(text,size,font,color,x,width)=>{
+    const words=String(text||'').trim().split(/\s+/).filter(Boolean);
+    if(words.length<3){page.drawText(words.join(' '),{x,y,size,font,color});return;}
+    const wordWidth=words.reduce((n,w)=>n+font.widthOfTextAtSize(w,size),0);
+    const gap=(width-wordWidth)/(words.length-1);
+    if(!Number.isFinite(gap)||gap<1.4||gap>7){
+      page.drawText(words.join(' '),{x,y,size,font,color});return;
+    }
+    let cx=x;
+    for(let i=0;i<words.length;i++){
+      page.drawText(words[i],{x:cx,y,size,font,color});
+      cx+=font.widthOfTextAtSize(words[i],size)+(i<words.length-1?gap:0);
+    }
+  };
+
+  const drawLines=(text,size=style.bodySize,font=regular,color=ink,indent=0,leading=style.leading,max=maxWidth-indent,justify=false)=>{
     const wrapped=wrapText(font,String(text||''),size,max);
     ensure(wrapped.length*leading+2);
-    for(const textLine of wrapped){page.drawText(textLine,{x:margin+indent,y,size,font,color});y-=leading;}
+    wrapped.forEach((textLine,i)=>{
+      const measured=font.widthOfTextAtSize(textLine,size);
+      const shouldJustify=justify&&i<wrapped.length-1&&measured>max*.62;
+      if(shouldJustify)drawJustifiedLine(textLine,size,font,color,margin+indent,max);
+      else page.drawText(textLine,{x:margin+indent,y,size,font,color});
+      y-=leading;
+    });
     return wrapped.length;
   };
   const drawRight=(text,size,font,color,yPos)=>{
@@ -241,63 +286,86 @@ async function renderResumePdf(source,job,profile,content,template='executive'){
     page.drawText(String(text||''),{x:pageSize[0]-margin-w,y:yPos,size,font,color});
   };
   const section=title=>{
-    ensure(29);y-=7;
-    page.drawText(title.toUpperCase(),{x:margin,y,size:style.sectionSize,font:bold,color:accent});
-    y-=7;page.drawLine({start:{x:margin,y},end:{x:pageSize[0]-margin,y},thickness:.45,color:line});y-=12;
+    ensure(32);y-=8;
+    if(templateName==='executive'){
+      page.drawRectangle({x:margin,y:y-2,width:3.2,height:style.sectionSize+5,color:accent});
+      page.drawText(title.toUpperCase(),{x:margin+10,y,size:style.sectionSize,font:bold,color:accent});
+      const tw=bold.widthOfTextAtSize(title.toUpperCase(),style.sectionSize);
+      page.drawLine({start:{x:margin+tw+20,y:y+4},end:{x:pageSize[0]-margin,y:y+4},thickness:.45,color:line});
+      y-=19;
+    }else if(templateName==='classic'){
+      page.drawText(title.toUpperCase(),{x:margin,y,size:style.sectionSize,font:bold,color:accent});
+      const tw=bold.widthOfTextAtSize(title.toUpperCase(),style.sectionSize);
+      page.drawLine({start:{x:margin+tw+12,y:y+4},end:{x:pageSize[0]-margin,y:y+4},thickness:.55,color:line});
+      y-=19;
+    }else{
+      page.drawRectangle({x:margin,y:y-3,width:maxWidth,height:17,color:soft});
+      page.drawText(title.toUpperCase(),{x:margin+7,y:y+1,size:style.sectionSize,font:bold,color:accent});
+      y-=23;
+    }
   };
   const simpleItems=(items,max=7)=>{
     for(const item of items.slice(0,max)){
-      ensure(24);
-      page.drawCircle({x:margin+2.3,y:y+3,size:1.15,color:accent});
-      drawLines(item,style.bodySize,regular,ink,10,style.leading);y-=style.itemGap;
+      ensure(25);
+      page.drawCircle({x:margin+2.5,y:y+3,size:1.15,color:accent});
+      drawLines(item,style.bodySize,regular,ink,10,style.leading,maxWidth-10,true);
+      y-=style.itemGap*.55;
     }
   };
   const experienceItems=items=>{
-    for(const value of items.slice(0,6)){
+    for(const value of items.slice(0,7)){
       const item=parseExperienceEntry(value);
       if(!item.role){simpleItems([value],1);continue;}
-      ensure(42);
-      const title=`${item.role}${item.company?` - ${item.company}`:''}`;
-      const titleSize=style.bodySize+.15;
-      const available=maxWidth-(item.dates?bold.widthOfTextAtSize(item.dates,9.1)+18:0);
-      const titleLines=wrapText(bold,title,titleSize,available);
-      for(const ln of titleLines){page.drawText(ln,{x:margin,y,size:titleSize,font:bold,color:ink});y-=style.leading;}
-      if(item.dates&&titleLines.length===1)drawRight(item.dates,9.1,regular,muted,y+style.leading);
-      else if(item.dates){page.drawText(item.dates,{x:margin,y,size:9.1,font:regular,color:muted});y-=11.5;}
+      ensure(44);
+      const titleSize=style.bodySize+.25;
+      const dateSize=Math.max(8.8,style.bodySize-.9);
+      const available=maxWidth-(item.dates?regular.widthOfTextAtSize(item.dates,dateSize)+18:0);
+      const titleLines=wrapText(bold,item.role,titleSize,available);
+      const topY=y;
+      for(const ln of titleLines){page.drawText(ln,{x:margin,y,size:titleSize,font:bold,color:ink});y-=style.leading*.92;}
+      if(item.dates&&titleLines.length===1)drawRight(item.dates,dateSize,regular,muted,topY);
+      else if(item.dates){page.drawText(item.dates,{x:margin,y,size:dateSize,font:regular,color:muted});y-=style.leading*.76;}
+      if(item.company){
+        page.drawText(item.company,{x:margin,y,size:style.bodySize-.18,font:italic,color:muted});
+        y-=style.leading*.86;
+      }
       for(const detail of item.details.slice(0,4)){
-        ensure(20);page.drawCircle({x:margin+2.3,y:y+3,size:1.05,color:accent});
-        drawLines(detail,style.bodySize-.15,regular,ink,10,style.leading-.2);y-=1;
+        ensure(21);page.drawCircle({x:margin+2.4,y:y+3,size:1.0,color:accent});
+        drawLines(detail,style.bodySize-.08,regular,ink,10,style.leading-.15,maxWidth-10,true);
+        y-=1;
       }
       y-=style.itemGap;
     }
   };
   const educationItems=items=>{
     for(const value of items.slice(0,6)){
-      const item=parseEducationEntry(value);ensure(30);
-      const size=style.bodySize+.05,available=maxWidth-(item.status?regular.widthOfTextAtSize(item.status,9.0)+20:0);
+      const item=parseEducationEntry(value);ensure(31);
+      const size=style.bodySize+.12,statusSize=Math.max(8.7,style.bodySize-.95);
+      const available=maxWidth-(item.status?regular.widthOfTextAtSize(item.status,statusSize)+20:0);
       const titleLines=wrapText(bold,item.title,size,available);
-      for(const ln of titleLines){page.drawText(ln,{x:margin,y,size,font:bold,color:ink});y-=style.leading;}
-      if(item.status&&titleLines.length===1)drawRight(item.status,9.0,regular,muted,y+style.leading);
-      else if(item.status){page.drawText(item.status,{x:margin,y,size:9.0,font:regular,color:muted});y-=11.5;}
-      if(item.institution){drawLines(item.institution,style.bodySize-.2,regular,muted,0,style.leading-.5);}
+      const topY=y;
+      for(const ln of titleLines){page.drawText(ln,{x:margin,y,size,font:bold,color:ink});y-=style.leading*.92;}
+      if(item.status&&titleLines.length===1)drawRight(item.status,statusSize,regular,muted,topY);
+      else if(item.status){page.drawText(item.status,{x:margin,y,size:statusSize,font:regular,color:muted});y-=style.leading*.75;}
+      if(item.institution){
+        page.drawText(item.institution,{x:margin,y,size:style.bodySize-.18,font:italic,color:muted});
+        y-=style.leading*.88;
+      }
       y-=style.itemGap;
     }
   };
   const projectItems=items=>{
     for(const value of items.slice(0,5)){
-      const item=parseProjectEntry(value);ensure(30);
-      drawLines(item.title,style.bodySize+.05,bold,ink,0,style.leading);
-      if(item.description)drawLines(item.description,style.bodySize-.15,regular,ink,0,style.leading-.25);
+      const item=parseProjectEntry(value);ensure(31);
+      drawLines(item.title,style.bodySize+.12,bold,ink,0,style.leading,maxWidth,false);
+      if(item.description)drawLines(item.description,style.bodySize-.08,regular,ink,0,style.leading-.15,maxWidth,true);
       y-=style.itemGap;
     }
   };
 
   newPage(false);
-  page.drawText(String(profile.name||'Candidato').slice(0,80),{x:margin,y,size:style.nameSize,font:bold,color:ink});
-  y-=style.nameSize+4;
-  page.drawText(content.target,{x:margin,y,size:style.targetSize,font:bold,color:accent});
-  y-=17;
-
+  const name=String(profile.name||'Candidato').slice(0,80);
+  const target=String(content.target||roleTitle(job)).slice(0,110);
   const contact=[
     resumeLocation(profile),
     profile.phone,
@@ -305,12 +373,47 @@ async function renderResumePdf(source,job,profile,content,template='executive'){
     profile.linkedin?resumeDisplayUrl(profile.linkedin):'',
     profile.portfolio?resumeDisplayUrl(profile.portfolio):''
   ].filter(Boolean).join('  |  ');
-  if(contact){drawLines(contact,8.8,regular,muted,0,11.6);y-=3;}
-  page.drawLine({start:{x:margin,y},end:{x:pageSize[0]-margin,y},thickness:.8,color:accent});y-=17;
+
+  if(templateName==='executive'){
+    const headerHeight=112;
+    page.drawRectangle({x:0,y:pageSize[1]-headerHeight,width:pageSize[0],height:headerHeight,color:rgb(.045,.105,.085)});
+    y=pageSize[1]-margin+1;
+    page.drawText(name,{x:margin,y,size:style.nameSize,font:bold,color:white});
+    y-=style.nameSize+6;
+    page.drawText(target,{x:margin,y,size:style.targetSize,font:bold,color:rgb(.68,.90,.80)});
+    y-=15;
+    if(contact){
+      const lines=wrapText(regular,contact,8.85,maxWidth);
+      for(const ln of lines.slice(0,2)){page.drawText(ln,{x:margin,y,size:8.85,font:regular,color:rgb(.90,.94,.92)});y-=11.4;}
+    }
+    y=pageSize[1]-headerHeight-12;
+  }else if(templateName==='classic'){
+    page.drawText(name,{x:centeredX(name,bold,style.nameSize),y,size:style.nameSize,font:bold,color:ink});
+    y-=style.nameSize+6;
+    page.drawText(target,{x:centeredX(target,italic,style.targetSize),y,size:style.targetSize,font:italic,color:accent});
+    y-=16;
+    if(contact){
+      for(const ln of wrapText(regular,contact,8.9,maxWidth).slice(0,2)){
+        page.drawText(ln,{x:centeredX(ln,regular,8.9),y,size:8.9,font:regular,color:muted});y-=11.5;
+      }
+    }
+    y-=4;
+    page.drawLine({start:{x:margin,y},end:{x:pageSize[0]-margin,y},thickness:1.15,color:accent});
+    y-=8;
+  }else{
+    page.drawRectangle({x:margin,y:y-style.nameSize-12,width:4,height:style.nameSize+30,color:accent});
+    page.drawText(name,{x:margin+12,y,size:style.nameSize,font:bold,color:ink});
+    y-=style.nameSize+4;
+    page.drawText(target,{x:margin+12,y,size:style.targetSize,font:bold,color:accent});
+    y-=14;
+    if(contact)drawLines(contact,8.7,regular,muted,12,11,maxWidth-12,false);
+    y-=4;
+  }
 
   if(content.summary){
     section('Perfil profissional');
-    drawLines(content.summary,style.bodySize+.15,regular,ink,0,style.leading+.15);y-=1;
+    drawLines(content.summary,style.bodySize+.12,regular,ink,0,style.leading+.12,maxWidth,true);
+    y-=style.itemGap*.35;
   }
 
   const hasExperience=Boolean(content.experience?.length);
@@ -322,15 +425,18 @@ async function renderResumePdf(source,job,profile,content,template='executive'){
     if(content.projects?.length){section('Projetos selecionados');projectItems(content.projects);}
   }
 
-  if(content.courses?.length){
-    section('Cursos complementares');simpleItems(content.courses,8);
-  }
-  if(hasExperience&&content.projects?.length){
-    section('Projetos selecionados');projectItems(content.projects);
-  }
+  if(content.courses?.length){section('Cursos complementares');simpleItems(content.courses,8);}
+  if(hasExperience&&content.projects?.length){section('Projetos selecionados');projectItems(content.projects);}
   if(content.skills?.length){
     section('Competências');
-    drawLines(content.skills.join('  |  '),style.bodySize,regular,ink,0,style.leading);y-=2;
+    const skills=content.skills.join('  •  ');
+    const skillLines=wrapText(regular,skills,style.bodySize-.02,maxWidth-18);
+    const boxH=skillLines.length*style.leading+12;
+    ensure(boxH+4);
+    page.drawRectangle({x:margin,y:y-boxH+8,width:maxWidth,height:boxH,color:soft,borderColor:line,borderWidth:.35});
+    y-=3;
+    for(const ln of skillLines){page.drawText(ln,{x:margin+9,y,size:style.bodySize-.02,font:regular,color:ink});y-=style.leading;}
+    y-=4;
   }
   if(content.languages?.length){section('Idiomas');simpleItems(content.languages,5);}
   if(content.other?.length){section('Informações adicionais');simpleItems(content.other,4);}
@@ -339,7 +445,6 @@ async function renderResumePdf(source,job,profile,content,template='executive'){
   fs.writeFileSync(out,await pdf.save());
   return out;
 }
-
 async function validateGeneratedPdf(file,profile,content){
   const data=new Uint8Array(fs.readFileSync(file));
   const doc=await pdfjs.getDocument({data,disableWorker:true}).promise;
@@ -643,7 +748,11 @@ function baseTargetFromSource(raw,requested=''){
     .replace(/^.*?\b(?:graduacao|graduação|bacharelado|tecnologo|tecnólogo|licenciatura)\s+(?:em\s+)?/i,'')
     .replace(/\s+[–—-].*$/,'').trim();
   if(role&&subject&&!norm(role).includes(norm(subject))&&!norm(subject).includes(norm(role)))return `${role} | ${subject}`.slice(0,110);
-  return (role||subject||'Perfil profissional').slice(0,110);
+  if(role)return role.slice(0,110);
+  const firstExperience=baseExperience(raw)[0]||'';
+  const experienceRole=parseExperienceEntry(firstExperience).role;
+  if(experienceRole)return basePrettyText(experienceRole).slice(0,110);
+  return (subject||'Perfil profissional').slice(0,110);
 }
 
 function baseSummary(content){
